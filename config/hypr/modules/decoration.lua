@@ -11,7 +11,7 @@ hl.config({
 		gaps_in = 8,
 		gaps_out = { top = 10, right = 10, bottom = 15, left = 10 },
 
-		border_size = 1,
+		border_size = 2,
 
 		-- El color lo escribe matugen (o la copia estática / un preset de la shell) en hypr/colors.lua: así
 		-- sobrevive a una recarga de Hyprland (paletas estáticas F-d, 2026-11-04). Si falta o no se puede
