@@ -30,8 +30,11 @@ test_privacy() {
     fi
     OUT="$(find "${files[@]}" -size +512k 2>/dev/null)"
     expect "no file over 512 KiB" test -z "$OUT"
-    OUT="$(printf '%s\n' "${files[@]}" | grep -iE '\.(png|jpe?g|gif|webp|mp4|mkv|webm|mov)$')"
-    expect "no images or videos" test -z "$OUT"
+    # The README screenshots (docs/screenshots/*.jpg) are the only images
+    # allowed; wallpapers and any other media are never distributed.
+    OUT="$(printf '%s\n' "${files[@]}" | grep -iE '\.(png|jpe?g|gif|webp|mp4|mkv|webm|mov)$' \
+        | grep -vE '^docs/screenshots/[^/]+\.jpg$')"
+    expect "no images or videos outside docs/screenshots/" test -z "$OUT"
     OUT="$(printf '%s\n' "${files[@]}" | grep -E '(^|/)(private\.lua|local\.fish|fish_variables|\.current-wallpaper)$')"
     expect "no private or state files" test -z "$OUT"
     if command -v gitleaks >/dev/null 2>&1; then

@@ -5,9 +5,26 @@ compositor, a `systemd --user` session, a static palette with optional
 wallpaper-driven colours (matugen), Fish, Kitty, Hyprlock, GTK/Qt theming —
 plus two tools to keep it backed up: **`dotbackup`** and **`diskbackup`**.
 
+<p align="center">
+  <img src="docs/screenshots/hero.jpg" width="820"
+       alt="A snowy anime wallpaper with the Sumi Shell Dynamic Capsule at the top centre showing the time, and two Kitty terminals with Fish showing system information.">
+</p>
+
 > Sumi-Files is a configuration to read and adapt, not a turnkey distribution.
 > Nothing here is installed without you asking for it, and nothing is
 > overwritten without a backup.
+
+## Gallery
+
+The bar, panels and windows in these screenshots are
+[Sumi Shell](https://github.com/kitasael-burakku/Sumi-Shell); the compositor,
+terminals, colours and window borders are Sumi-Files.
+
+| | |
+| --- | --- |
+| <img src="docs/screenshots/notch.jpg" width="400" alt="The full desktop with Edge at the top centre: a black notch-shaped capsule joined to the screen edge with the time, a music bubble and a small audio visualizer."><br>**Edge** | <img src="docs/screenshots/bar-notch.jpg" width="400" alt="The full desktop with Bar-Edge: the Dynamic Bar joined to the top edge: tools on the left, the playing track, clock and system load in the centre, status on the right."><br>**Bar-Edge** |
+| <img src="docs/screenshots/bar-settings-calendar.jpg" width="400" alt="A floating Dynamic Bar across the top with the Settings window on its General page and the Calendar window showing November 2026."><br>**Dynamic Bar** with Settings and Calendar | <img src="docs/screenshots/bar-left-terminal.jpg" width="400" alt="A vertical Dynamic Bar along the left edge with the Settings window on its Layout page and a Kitty terminal with system information."><br>**Dynamic Bar on the left edge** with a terminal |
+| <img src="docs/screenshots/wallpaper-picker.jpg" width="400" alt="The Dynamic Bar across the top with the wallpaper picker open below it: a search field, filters and a strip of wallpaper thumbnails with the current one selected."><br>**Wallpaper picker** | <img src="docs/screenshots/settings-wallhaven.jpg" width="400" alt="Two floating windows with the accent-coloured border: the Wallhaven browser with its search field and filters, and Settings on the Login screen page."><br>**Wallhaven browser** and Settings |
 
 ## Contents
 
@@ -100,4 +117,5 @@ session still starts, with Hyprlock as the lock screen.
 
 MIT — see [LICENSE](LICENSE). Third-party code and configuration formats are
 credited in [THIRD_PARTY.md](THIRD_PARTY.md); keep those notices if you reuse
-the files.
+the files. The screenshots in [`docs/screenshots/`](docs/screenshots),
+including the wallpaper shown in them, are the author's own work.

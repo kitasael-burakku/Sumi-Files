@@ -12,6 +12,9 @@ suite checks it against `--version`.
 ## [Unreleased]
 
 ### Added
+- README: a hero screenshot and a gallery (`docs/screenshots/`, JPEG,
+  1600×900, metadata stripped; user, host and location pixelated). The
+  privacy test now allows images only as `docs/screenshots/*.jpg`.
 - `docs/MIGRATING.md`: moving a machine that already has its own
   configuration to Sumi-Files, `dotbackup` and `diskbackup`; linked from the
   README and the other documents.
