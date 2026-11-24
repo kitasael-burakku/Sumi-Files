@@ -47,6 +47,19 @@ hl.window_rule({
 -------------------
 
 ---- Presets
+-- Video and games always fully opaque: the global active/inactive opacity
+-- (decoration.lua) is for terminals and utilities, not for content.
+hl.window_rule({
+	name = "opaque-media",
+	match = { class = "^(mpv|vlc|org\\.videolan\\.VLC|io\\.github\\.celluloid_player\\.Celluloid|org\\.kde\\.haruna|obs|com\\.obsproject\\.Studio)$" },
+	opaque = true,
+})
+hl.window_rule({
+	name = "opaque-games",
+	match = { class = "^(steam|steam_app_\\d+|gamescope|Minecraft.*|minecraft-launcher|lutris|heroic)$" },
+	opaque = true,
+})
+
 hl.layer_rule({ name = "blur quickshell", match = { namespace = "sumi-shell" }, blur = true, ignore_alpha = 0.4 })
 
 hl.layer_rule({

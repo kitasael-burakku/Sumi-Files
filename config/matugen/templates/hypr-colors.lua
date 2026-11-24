@@ -5,6 +5,6 @@
 -- El cambio inmediato lo sigue haciendo dynamic-colors.sh (escribir aquí no recarga Hyprland).
 -- Mismos colores que matugen/templates/hypr-colors.sh. Estático: hypr/colors.static.lua
 return {
-  active_border   = { colors = { "rgba({{colors.primary.default.hex_stripped}}cc)", "rgba({{colors.secondary.default.hex_stripped}}99)" }, angle = 45 },
+  active_border   = "rgba({{colors.primary.default.hex_stripped}}cc)",
   inactive_border = "rgba({{colors.primary.default.hex_stripped}}0f)",
 }

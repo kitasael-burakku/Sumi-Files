@@ -34,7 +34,9 @@ hl.animation({ leaf = "fadeSwitch", enabled = true, speed = 1.6, bezier = "ryuOu
 
 -- ─── Borde ──────────────────────────────────────────────────────────────
 hl.animation({ leaf = "border", enabled = true, speed = 2.5, bezier = "ryuOut" })
-hl.animation({ leaf = "borderangle", enabled = true, speed = 100, bezier = "lineal", style = "loop" })
+-- Off since the border became solid: a "loop" animation keeps Hyprland
+-- redrawing every frame even when nothing moves, for an angle there isn't.
+hl.animation({ leaf = "borderangle", enabled = false })
 
 -- ─── Layers (barra, lanzador, notificaciones) ───────────────────────────
 hl.animation({ leaf = "layersIn", enabled = true, speed = 2.0, spring = "flotacion", style = "slide" })

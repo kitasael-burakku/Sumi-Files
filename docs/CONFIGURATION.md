@@ -8,8 +8,8 @@ in the repository** the next time you run `dotbackup`.
 
 | File (under `~/.config/`) | Value | Default |
 |---|---|---|
-| `hypr/modules/monitors.lua` | `mode`, `position`, `scale` | `1920x1080@200.00Hz`, all outputs. Use `mode = "preferred"` for auto-detection |
-| `hypr/modules/input.lua` | keyboard layout; per-device blocks | `us,es`, Alt+Shift switches. Device examples are commented out — use the slugs from `hyprctl devices` |
+| `hypr/modules/monitors.lua` | `mode`, `position`, `scale` | `highrr` (highest refresh rate), all outputs. Pin `"WxH@Hz"` if you need a specific mode |
+| `hypr/modules/input.lua` | keyboard layout, pointer acceleration; per-device blocks | `us,es`, Alt+Shift switches, `flat` acceleration. Device examples are commented out — use the slugs from `hyprctl devices` (or put them in `private.lua`) |
 | `hypr/modules/environment.lua` | `CursorTheme`, `CursorSize`, `GTKTheme` | `Bibata-Modern-Classic`, 16, `Adwaita-dark` |
 | `hypr/modules/environment.lua` | VA-API/VDPAU driver | commented out; uncomment the line for your GPU |
 | `hypr/modules/environment.lua` | `HostnamePretty` | `$HOSTNAME_PRETTY`, else `/etc/hostname` |

@@ -6,15 +6,15 @@
 # 2026-11-04) and drops what this applied: the persistent copy is
 # hypr/colors.lua (template hypr-colors.lua), read by modules/decoration.lua.
 #
-# "Fully dynamic": the active border is a gradient between the wallpaper's
-# accent and secondary colors (no longer white). The inactive one is the
-# accent at low alpha — still subtle, but no longer a fixed white.
+# "Fully dynamic": the active border is the wallpaper's accent, solid (no
+# gradient, no angle — and so nothing for an angle animation to redraw). The
+# inactive one is the same accent at low alpha.
 # Static reference: ~/.config/hypr/scripts/dynamic-colors.static.sh
 
 hyprctl eval 'hl.config({
   general = {
     col = {
-      active_border   = { colors = {"rgba({{colors.primary.default.hex_stripped}}cc)", "rgba({{colors.secondary.default.hex_stripped}}99)"}, angle = 45 },
+      active_border   = "rgba({{colors.primary.default.hex_stripped}}cc)",
       inactive_border = "rgba({{colors.primary.default.hex_stripped}}0f)",
     },
   },

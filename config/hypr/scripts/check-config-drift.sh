@@ -24,7 +24,7 @@
 #    3. the four places that hardcode the icon theme agree
 #    4. every file matugen generates has something that loads it
 #    5. no broken symlinks in the config dirs this repo owns
-#    6. the lockscreen chain (ADR-30, docs/lock/CONFIGURACION.md §6): lock.sh
+#    6. the lockscreen chain (Sumi Shell's lock design, ADR-30): lock.sh
 #       exists and is executable, hypridle.conf actually calls it and keeps
 #       inhibit_sleep, Hyprland has the two options the lock needs, the
 #       rescue unit exists and is wired into sumi-shell.service, and

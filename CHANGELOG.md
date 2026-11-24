@@ -11,6 +11,17 @@ suite checks it against `--version`.
 
 ## [Unreleased]
 
+### Changed
+- Active window border is a solid accent colour in dynamic mode too (no
+  gradient, no 45° angle), and the `borderangle` loop animation is off.
+- `monitors.lua` uses `mode = "highrr"` instead of a fixed mode;
+  `render.direct_scanout = 2` (auto, games only).
+- Pointer acceleration is `flat` for every device (`input.lua`).
+- Video players, OBS, Steam and games are always fully opaque.
+
+### Removed
+- `decoration.rounding_power` (no effect with `rounding = 0`).
+
 ## 0.1.0 — 2026-11-24
 
 ### Added
