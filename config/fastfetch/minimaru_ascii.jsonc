@@ -1,0 +1,30 @@
+// Minimaru Black (ASCII) · Fastfetch · Banner
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "display": {
+    "separator": " ~> ",
+    "color": { "keys": "33" }
+  },
+  "logo": {
+    "source": "~/.config/fastfetch/fastfetchlogo/minimaru.txt",
+    "type": "file",
+    "position": "top",
+    "color": { "1": "33", "2": "93" }
+  },
+  "modules": [
+    "break",
+    { "type": "title", "key": "{#35} Trainer", "format": "{user-name}" },
+    "break",
+    { "type": "os", "key": "{#33} OS", "format": "{pretty-name}  {#90}[{arch}]" },
+    { "type": "kernel", "key": "{#33}├ Kernel", "format": "{sysname}  {#90}[v{release}]" },
+    { "type": "shell", "key": "{#33}├ Shell", "format": "{pretty-name}" },
+    { "type": "wm", "key": "{#33}└ WM", "format": "{pretty-name}" },
+    "break",
+    { "type": "cpu", "key": "{#34}󰻠 Power", "temp": true, "format": "{name}  {temperature}" },
+    { "type": "gpu", "key": "{#34}├󰍛 Speed", "detectionMethod": "auto", "driverSpecific": false, "format": "{name}" },
+    { "type": "memory", "key": "{#34}├󰑭 Wisdom" },
+    { "type": "disk", "key": "{#34}├ Stamina", "folders": "/" },
+    { "type": "uptime", "key": "{#34}└󰅐 Guts" },
+    "break"
+  ]
+}

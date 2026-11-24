@@ -1,0 +1,14 @@
+# Plantilla: install.sh sustituye @USER@ y la copia a /etc/systemd/system/.
+# Socket de infinite-input: solo @USER@ (y root) puede conectarse (0600).
+[Unit]
+Description=Infinite Desktop — socket del lector de entrada (solo modificadores, clic y movimiento)
+
+[Socket]
+ListenStream=/run/infinite-input.sock
+SocketUser=@USER@
+SocketGroup=@USER@
+SocketMode=0600
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,60 @@
+# ============================================================================
+#  sumi-files.list — what Sumi-Files manages, relative to ~/.config
+# ----------------------------------------------------------------------------
+#  Read by three tools, so they can never disagree:
+#    install.sh       repo → ~/.config   (config/<entry> → ~/.config/<entry>)
+#    bin/dotbackup    ~/.config → repo   (and `dotbackup --check`)
+#    hypr/scripts/dotbackup-remind.sh   (through `dotbackup --check`)
+#
+#  Syntax (docs/DOTBACKUP.md § Manifest):
+#    dir/            a whole directory, mirrored (files deleted at the source
+#                    are deleted in the repo)
+#    file            a single file
+#    src => dst      different name in the repo (dst is relative to config/)
+#    ~/path          a source outside ~/.config, relative to $HOME
+#  Absolute paths and '..' are rejected.
+#
+#  systemd/, gtk-*/ and qt*ct/ are listed file by file on purpose: those
+#  folders also hold machine state (enabled-unit symlinks, GTK bookmarks with
+#  recent paths, qt*ct window geometry) and units you may not want public.
+#  A versioned file in one of those folders that leaves this list is deleted
+#  from the repo on the next dotbackup.
+# ============================================================================
+
+cava/
+fastfetch/
+fish/
+hypr/
+hyprlock/
+kitty/
+matugen/
+sumi-shell/
+
+starship.static.toml
+
+systemd/user/hyprland-session.service
+systemd/user/hypridle.service
+systemd/user/awww.service
+systemd/user/wallpaper.service
+systemd/user/cliphist-text.service
+systemd/user/cliphist-image.service
+systemd/user/udiskie.service
+systemd/user/infinite-desktop.service
+systemd/user/polkit-agent.service
+systemd/user/updates-check.service
+systemd/user/updates-check.timer
+systemd/user/thumbs-refresh.service
+systemd/user/thumbs-refresh.timer
+systemd/user/healthcheck-notify.service
+systemd/user/healthcheck-notify.timer
+systemd/user/dotbackup-remind.service
+systemd/user/dotbackup-remind.timer
+
+gtk-3.0/gtk.css
+gtk-3.0/gtk-colors.static.css
+gtk-4.0/gtk.css
+gtk-4.0/gtk-colors.static.css
+qt5ct/qt5ct.conf
+qt5ct/colors/minimaru.static.conf
+qt6ct/qt6ct.conf
+qt6ct/colors/minimaru.static.conf

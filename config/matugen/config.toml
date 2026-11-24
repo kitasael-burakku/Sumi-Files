@@ -1,0 +1,104 @@
+# ~/.config/matugen/config.toml
+# Minimaru — theming dinámico por wallpaper. Todo sigue al wallpaper
+# (fondos, acentos, bordes, starship, fish) salvo los colores semánticos
+# (error/crítico) que quedan fijos a propósito.
+#
+# Invocado como: matugen image <frame-o-imagen> -m dark -t scheme-tonal-spot
+# vía ~/.config/hypr/scripts/matugen_reload.sh (gateado por el sentinel
+# ~/.config/matugen/enabled — apagado por defecto).
+#
+# A propósito NO hay [config.wallpaper]: el wallpaper lo siguen manejando
+# awww/mpvpaper/wallpaper_grid.sh, matugen solo genera colores.
+
+# prefer = "saturation" evita el prompt interactivo de matugen cuando una
+# imagen tiene varios colores candidatos igual de dominantes — necesario
+# porque esto se invoca desde un script en background, sin terminal.
+[config]
+prefer = "saturation"
+
+# REGLA DE LOS POST_HOOK, pagada cara. matugen corre cada uno en PRIMER PLANO y
+# espera a que termine, y escribe cada plantilla disparando SU hook antes de
+# pasar a la siguiente: un hook colgado cuelga a matugen entero y lo que venía
+# detrás no llega a escribirse nunca — entre ello `colors.json`, que es la
+# última. De ahí que «los colores no siempre se registraran». El culpable era
+# `swaync-client -rs` contra una unidad enmascarada, que imprime «Will wait for
+# connection...» y espera PARA SIEMPRE (medido el 2026-09-16: dos matugen
+# colgados 7 h en do_wait y ~40 invocaciones sin un solo «matugen OK»). Esa
+# plantilla se retiró en la Fase 4, el 2026-09-22; la regla que dejó, no: todo
+# hook nuevo va acotado con `timeout` y termina en `|| true`.
+
+[templates.kitty]
+input_path  = '~/.config/matugen/templates/kitty-colors.conf'
+output_path = '~/.config/kitty/colors/colors.conf'
+post_hook   = 'killall -SIGUSR1 kitty 2>/dev/null || true'
+
+[templates.hyprlock]
+input_path  = '~/.config/matugen/templates/hyprlock-colors.conf'
+output_path = '~/.config/hyprlock/colors.conf'
+# sin post_hook: hyprlock se relanza por invocación (cada bloqueo es un proceso nuevo)
+
+[templates.hypr_live]
+input_path  = '~/.config/matugen/templates/hypr-colors.sh'
+output_path = '~/.config/hypr/dynamic-colors.sh'
+# Acotado por la regla de arriba: `hyprctl` sin compositor detrás (o con el
+# socket ocupado) deja a matugen esperando.
+post_hook   = 'timeout 5 bash ~/.config/hypr/dynamic-colors.sh >/dev/null 2>&1 || true'
+
+[templates.hypr_colors]
+input_path  = '~/.config/matugen/templates/hypr-colors.lua'
+output_path = '~/.config/hypr/colors.lua'
+# Paletas estáticas F-d (2026-11-04): el mismo borde que hypr_live, pero en un archivo que
+# hypr/modules/decoration.lua lee al arrancar y en cada recarga de Hyprland (lo de hypr_live
+# es en caliente y se perdía al recargar). Sin post_hook: hypr_live ya lo aplica en vivo.
+
+[templates.starship]
+input_path  = '~/.config/matugen/templates/starship.toml'
+output_path = '~/.config/starship.toml'
+# sin post_hook: starship relee su config en cada render de prompt, solo
+
+[templates.fish]
+input_path  = '~/.config/matugen/templates/theme-goldship.fish'
+output_path = '~/.config/fish/conf.d/theme-goldship.fish'
+# sin post_hook posible: fish solo lee conf.d/ al arrancar la shell, no hay
+# señal de reload en caliente — las terminales nuevas ya lo recogen solas
+
+[templates.music_progress]
+input_path  = '~/.config/matugen/templates/music-progress-colors.sh'
+output_path = '~/.config/hyprlock/scripts/music-colors.sh'
+# sin post_hook: music-progress.sh relee este archivo en cada invocación
+# (cada 1s), no hace falta ninguna señal
+
+[templates.gtk3]
+input_path  = '~/.config/matugen/templates/gtk-colors.css'
+output_path = '~/.config/gtk-3.0/gtk-colors.css'
+# GTK 3 does not reload the user CSS provider when this file changes.
+# Reopening the app reads it; no unsupported global injection/reload is used.
+
+[templates.gtk4]
+input_path  = '~/.config/matugen/templates/gtk-colors.css'
+output_path = '~/.config/gtk-4.0/gtk-colors.css'
+# mismo archivo de entrada que gtk3 (los overrides son idénticos en ambas
+# versiones) — sólo cambia el output_path. GTK 4.24.1 reloaded user CSS in
+# the audit on effective color-scheme changes, not on same-mode recoloring.
+
+[templates.qt5]
+input_path  = '~/.config/matugen/templates/qt-colors.conf'
+output_path = '~/.config/qt5ct/colors/minimaru.conf'
+# Notify the selected existing qt5ct profile after the palette is complete.
+# The plugin coalesces filesystem events (about 3 s); no application restart.
+post_hook = 'timeout 5 python3 -B ~/.config/quickshell/sumi/scripts/qt-palette-notify.py --config ~/.config/qt5ct/qt5ct.conf --palette ~/.config/qt5ct/colors/minimaru.conf || true'
+
+[templates.qt6]
+input_path  = '~/.config/matugen/templates/qt-colors.conf'
+output_path = '~/.config/qt6ct/colors/minimaru.conf'
+# Same palette template; notify only the matching existing Qt 6 profile.
+post_hook = 'timeout 5 python3 -B ~/.config/quickshell/sumi/scripts/qt-palette-notify.py --config ~/.config/qt6ct/qt6ct.conf --palette ~/.config/qt6ct/colors/minimaru.conf || true'
+
+[templates.sumi_shell]
+input_path  = '~/.config/quickshell/sumi/templates/matugen-colors.json'
+# Ruta por defecto, válida también al invocar matugen directamente. Los flujos
+# de Minimaru resuelven XDG_STATE_HOME con scripts/theme_paths.py (F1a).
+output_path = '~/.local/state/sumi-shell/colors.json'
+# sin post_hook: Sumi Shell vigila el archivo con FileView(watchChanges) y
+# re-tiñe solo, sin señal ni reinicio (services/Colors.qml).
+

@@ -1,0 +1,10 @@
+# ============================================================================
+#  private-patterns — copy to ~/.config/sumi-files/private-patterns.
+#  One fixed string per line. dotbackup's 10-privacy hook refuses to commit
+#  while any file git would commit contains one of them. Keep this file out
+#  of every repository (it lists exactly what you don't want published).
+# ============================================================================
+# your-login-name
+# your-real-name
+# your-mouse-device-slug
+# Your City

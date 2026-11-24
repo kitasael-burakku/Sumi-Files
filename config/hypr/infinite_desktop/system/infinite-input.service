@@ -1,0 +1,53 @@
+# Lector de entrada mínimo para Infinite Desktop. Lo instala install.sh en
+# /etc/systemd/system/. Corre con un usuario dinámico en el grupo "input" para
+# que TU usuario no necesite estar en ese grupo (que daría a cualquier programa
+# tuyo acceso a todo el teclado). Solo reenvía Super/Alt/Ctrl, clic izquierdo y
+# movimiento del ratón por /run/infinite-input.sock (ver input_reader.py).
+[Unit]
+Description=Infinite Desktop — lector de entrada (solo modificadores, clic y movimiento)
+Requires=infinite-input.socket
+After=infinite-input.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /usr/local/lib/infinite-desktop/input_reader.py
+Restart=on-failure
+RestartSec=1
+
+# Identidad: usuario efímero, solo con el grupo input.
+DynamicUser=yes
+SupplementaryGroups=input
+
+# Dispositivos: solo lectura de /dev/input/* (más los pseudo-dispositivos básicos).
+DevicePolicy=closed
+DeviceAllow=char-input r
+
+# Sin red, sin privilegios, sin escritura en el sistema.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateIPC=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM

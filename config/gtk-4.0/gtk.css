@@ -1,0 +1,28 @@
+@import 'gtk-colors.css';
+
+/* Nautilus con blur de Hyprland (2026-11-13).
+   GTK 4.24 habla ext-background-effect-v1: crea el objeto de efecto en cada ventana y,
+   si el CSS no pide blur, deja la región vacía = «no blurrees esta ventana». Hyprland
+   0.57 lo obedece, así que ni decoration.blur ni una regla de ventana la blurrean.
+   `backdrop-filter: blur()` hace que GTK mande set_blur_region con toda la ventana y
+   Hyprland aplica su propio blur (el de decoration.blur, igual que en kitty).
+   El fondo tiene que ser translúcido desde GTK para que se vea. Sólo afecta a Nautilus;
+   para otra app GTK4 se repite con su clase CSS (GTK_DEBUG=interactive la muestra). */
+window.nautilus-window {
+  background-color: alpha(@window_bg_color, 0.80);
+  backdrop-filter: blur(20px);
+}
+window.nautilus-window .sidebar-pane,
+window.nautilus-window .navigation-sidebar {
+  background-color: alpha(@sidebar_bg_color, 0.80);
+}
+window.nautilus-window .content-pane,
+window.nautilus-window headerbar,
+window.nautilus-window .view,
+window.nautilus-window gridview,
+window.nautilus-window columnview,
+window.nautilus-window listview,
+window.nautilus-window scrolledwindow,
+window.nautilus-window toolbarview {
+  background-color: transparent;
+}

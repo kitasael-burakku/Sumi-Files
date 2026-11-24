@@ -1,0 +1,837 @@
+#!/usr/bin/env -S fish --no-config
+# SPDX-License-Identifier: MIT
+# ============================================================================
+#  diskbackup — mirror git repositories, folders, loose files, a plain-text
+#  inventory of the system and the newest dotbackup snapshot to a second
+#  disk. Everything it backs up comes from a settings file; nothing about the
+#  machine is hardcoded. Part of Sumi-Files; manual in docs/DISKBACKUP.md.
+# ----------------------------------------------------------------------------
+#  Defence in depth next to dotbackup: dotbackup publishes the config to git,
+#  diskbackup keeps what must never be published (private files, projects
+#  with their own history, manually installed themes, wallpapers) somewhere
+#  that isn't the system disk.
+#
+#  Destructive operations (rsync --delete) only ever run inside a destination
+#  that carries the marker file created by `diskbackup --init`, so a typo in
+#  the settings can't wipe an unrelated folder.
+# ============================================================================
+
+set -g VERSION 1.0.0
+set -g PROG diskbackup
+set -g MARKER .diskbackup-target
+# Backups hold private files: everything diskbackup creates is owner-only.
+umask 077
+
+set -g E_OK 0
+set -g E_FAIL 1
+set -g E_PENDING 2
+set -g E_USAGE 64
+set -g E_DATA 65
+set -g E_NOINPUT 66
+set -g E_UNAVAILABLE 69
+set -g E_CANTCREAT 73
+set -g E_NOPERM 77
+set -g E_CONFIG 78
+set -g E_CANCEL 130
+
+# Fixed layout under the destination (kept from the original tool so existing
+# backups stay valid).
+set -g SECTIONS repos themes files dirs state snapshots
+set -g SUBDIR_repos git-mirrors
+set -g SUBDIR_themes manual-themes
+set -g SUBDIR_files private-files
+set -g SUBDIR_dirs local-dirs
+set -g SUBDIR_state system-state
+set -g SUBDIR_snapshots config-snapshots
+
+# ── Output ──────────────────────────────────────────────────────────────────
+
+set -g __color 0
+set -g __quiet 0
+
+# Always prints exactly one element: an empty command substitution would
+# otherwise erase the whole word it is concatenated with.
+function _c
+    if test "$__color" = 1
+        set_color $argv
+    else
+        echo
+    end
+end
+
+function say
+    test "$__quiet" = 1; and return 0
+    echo $argv
+end
+
+function note
+    test "$__quiet" = 1; and return 0
+    echo (_c brblack)"    $argv"(_c normal)
+end
+
+function item_ok
+    test "$__quiet" = 1; and return 0
+    echo (_c brblack)"    ✓ $argv"(_c normal)
+end
+
+# Pending lines keep the original "    + " / "    ~ " shape: minimaru doctor
+# greps for it.
+function item_pending --argument-names sign
+    echo (_c yellow)"    $sign $argv[2..-1]"(_c normal)
+end
+
+function item_new
+    echo (_c green)"    + $argv"(_c normal)
+end
+
+function item_warn
+    echo (_c yellow)"    ⚠ $argv"(_c normal) >&2
+end
+
+function item_fail
+    echo (_c red)"    ✘ $argv"(_c normal) >&2
+end
+
+function err
+    echo (_c red)"  ✘ $argv"(_c normal) >&2
+end
+
+function die --argument-names code
+    err $argv[2..-1]
+    exit $code
+end
+
+function heading
+    test "$__quiet" = 1; and return 0
+    echo ""
+    echo (_c --bold)"  $argv"(_c normal)
+end
+
+function usage
+    echo "Usage: $PROG [OPTIONS]
+
+Mirror git repositories, folders, loose files, a system inventory and the
+newest dotbackup snapshot to a second disk, as listed in a settings file.
+
+Options:
+  -c, --config FILE       settings file (default: ~/.config/sumi-files/diskbackup.conf)
+  -d, --dest DIR          destination; overrides 'dest =' in the settings
+      --init              create the destination and its marker file, then exit
+      --check             write nothing; exit 2 if anything is pending, 0 if not
+  -n, --dry-run           print what would be done; write and run nothing
+  -o, --only SECTION      only this section, repeatable:
+                          repos, themes, files, dirs, state, snapshots
+  -e, --exclude PATTERN   rsync exclude for themes/dirs (and file names), repeatable
+      --no-delete         don't delete in mirrors what was deleted at the source
+      --require-mount DIR refuse to run unless DIR is a mount point
+      --no-require-mount  ignore 'require_mount' from the settings
+  -y, --yes               non-interactive: don't ask before writing
+  -i, --interactive       ask even when stdin is not a terminal
+      --pause             wait for Enter before exiting (for a launcher window)
+  -q, --quiet             only pending items, warnings and errors
+      --no-color          plain output (also honoured: NO_COLOR)
+  -h, --help              this help
+  -V, --version           print the version
+
+First use:  cp share/examples/diskbackup.conf ~/.config/sumi-files/
+            \$EDITOR ~/.config/sumi-files/diskbackup.conf
+            diskbackup --init && diskbackup --dry-run && diskbackup
+
+Exit codes: 0 ok · 1 failed or destination unavailable · 2 --check: pending
+            64 usage · 65 bad data · 66 no settings · 69 missing dependency
+            73 can't create · 77 permission denied · 78 bad settings · 130 cancelled"
+end
+
+function usage_error
+    echo "$PROG: $argv" >&2
+    echo "Try '$PROG --help'." >&2
+    exit $E_USAGE
+end
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+function expand_path --argument-names p
+    set p (string replace -r '^~(?=/|$)' -- "$HOME" "$p")
+    set p (string replace -r '^\$HOME(?=/|$)' -- "$HOME" "$p")
+    set p (string replace -r '^\$\{HOME\}(?=/|$)' -- "$HOME" "$p")
+    printf '%s\n' "$p"
+end
+
+function is_within --argument-names child parent
+    set child (path resolve -- "$child")
+    set parent (path resolve -- "$parent")
+    test "$child" = "$parent"; and return 0
+    string match -q -- "$parent/*" "$child"
+end
+
+function need
+    for cmd in $argv
+        command -q $cmd; or die $E_UNAVAILABLE "missing dependency: $cmd"
+    end
+end
+
+function ask --argument-names question
+    if test -t 0
+        printf '%s [y/N] ' (_c --bold)"  $question"(_c normal) >&2
+    else
+        printf '%s [y/N]\n' "  $question" >&2
+    end
+    read -l reply
+    or begin
+        echo >&2
+        die $E_CANCEL "cancelled (end of input)"
+    end
+    string match -qir '^(y|yes)$' -- (string trim -- "$reply")
+end
+
+# Device number of a path, or of its nearest existing ancestor.
+function device_of --argument-names p
+    while not test -e "$p"
+        set p (path dirname -- "$p")
+    end
+    command stat -L -c %d -- "$p"
+end
+
+# True when DEST lives on the same filesystem as / or $HOME — which is
+# exactly where it lands when the backup disk isn't mounted. Overridable
+# (space-separated paths) for systems with other layouts, and for tests.
+function on_system_disk --argument-names p
+    set -l dev (device_of "$p")
+    set -l paths / $HOME
+    set -q DISKBACKUP_SYSTEM_PATHS; and set paths (string split ' ' -- $DISKBACKUP_SYSTEM_PATHS)
+    for sp in $paths
+        test -n "$sp"; and test -e "$sp"; or continue
+        test (device_of "$sp") = "$dev"; and return 0
+    end
+    return 1
+end
+
+# rsync --delete and cp follow symlinks in the destination: a link planted
+# there (or created by mistake) must never redirect a write.
+function refuse_link --argument-names p
+    if test -L "$p"
+        item_fail "$p is a symlink; refusing to write through it"
+        set failed 1
+        return 1
+    end
+    return 0
+end
+
+function wants --argument-names section
+    test (count $ONLY) -eq 0; and return 0
+    contains -- $section $ONLY
+end
+
+function rsync_excludes
+    for p in $EXCLUDES
+        printf '%s\n' "--exclude=$p"
+    end
+end
+
+function excluded_name --argument-names p
+    set -l name (path basename -- "$p")
+    for e in $EXCLUDES
+        string match -q -- (string trim -r -c / -- "$e") "$name"; and return 0
+    end
+    return 1
+end
+
+# ── Settings file ───────────────────────────────────────────────────────────
+# INI-like and parsed, never sourced. Lists: S_<section>_src / S_<section>_name.
+
+function load_config --argument-names file
+    set -g S_repos_src
+    set -g S_repos_name
+    set -g S_themes_src
+    set -g S_themes_name
+    set -g S_files_src
+    set -g S_dirs_src
+    set -g S_dirs_name
+    set -g S_state_name
+    set -g S_state_cmd
+    set -g S_snapshots_from
+    set -g S_snapshots_glob
+    set -g G_dest
+    set -g G_require_mount
+    set -g G_delete true
+    set -l section ""
+    set -l n 0
+    for raw in (command cat -- "$file")
+        set n (math $n + 1)
+        set -l line (string trim -- (string replace -r '^\s*[#;].*$' '' -- "$raw"))
+        test -n "$line"; or continue
+        if string match -qr '^\[(.+)\]$' -- "$line"
+            set section (string match -rg '^\[(.+)\]$' -- "$line" | string trim)
+            contains -- $section general $SECTIONS
+            or die $E_CONFIG "$file:$n: unknown section [$section]"
+            continue
+        end
+        test -n "$section"; or die $E_CONFIG "$file:$n: entry outside a [section]"
+        set -l kv (string split -m1 '=' -- "$line")
+        set -l key (string trim -- $kv[1])
+        set -l val ""
+        test (count $kv) -eq 2; and set val (string trim -- $kv[2])
+        switch $section
+            case general
+                test (count $kv) -eq 2; or die $E_CONFIG "$file:$n: expected 'key = value'"
+                switch $key
+                    case dest
+                        set G_dest (expand_path "$val")
+                    case require_mount
+                        set G_require_mount (expand_path "$val")
+                    case delete
+                        contains -- $val true false; or die $E_CONFIG "$file:$n: delete must be true or false"
+                        set G_delete $val
+                    case '*'
+                        die $E_CONFIG "$file:$n: unknown key '$key' in [general]"
+                end
+            case repos themes dirs
+                test (count $kv) -eq 2; and test -n "$val"
+                or die $E_CONFIG "$file:$n: expected 'path = name'"
+                string match -qr '^[A-Za-z0-9._-]+$' -- "$val"; and not string match -qr '^\.+$' -- "$val"
+                or die $E_CONFIG "$file:$n: name '$val' may only use letters, digits, '.', '_' and '-'"
+                set -l src (expand_path "$key")
+                string match -q -- '/*' "$src"; or die $E_CONFIG "$file:$n: '$key' must be absolute or start with ~/"
+                if contains -- $val $S_repos_name $S_themes_name $S_dirs_name
+                    die $E_CONFIG "$file:$n: name '$val' is used twice"
+                end
+                set -ga S_{$section}_src "$src"
+                set -ga S_{$section}_name "$val"
+            case files
+                test (count $kv) -eq 1; or die $E_CONFIG "$file:$n: [files] takes one path per line"
+                set -l src (expand_path "$key")
+                string match -q -- '/*' "$src"; or die $E_CONFIG "$file:$n: '$key' must be absolute or start with ~/"
+                set -ga S_files_src "$src"
+            case state
+                test (count $kv) -eq 2; and test -n "$val"
+                or die $E_CONFIG "$file:$n: expected 'name.txt = command'"
+                string match -qr '^[A-Za-z0-9._-]+$' -- "$key"; and not string match -qr '^\.+$' -- "$key"
+                or die $E_CONFIG "$file:$n: state file name '$key' may only use letters, digits, '.', '_' and '-'"
+                set -ga S_state_name "$key"
+                set -ga S_state_cmd "$val"
+            case snapshots
+                test (count $kv) -eq 2; or die $E_CONFIG "$file:$n: expected 'key = value'"
+                switch $key
+                    case from
+                        set S_snapshots_from (expand_path "$val")
+                    case glob
+                        set S_snapshots_glob "$val"
+                    case '*'
+                        die $E_CONFIG "$file:$n: unknown key '$key' in [snapshots]"
+                end
+        end
+    end
+end
+
+# Where a loose file is stored: relative to ~/.config when it lives there
+# (same layout as before, so a restore is "copy back with the same tree"),
+# otherwise under _home/ or _root/.
+function file_rel --argument-names src
+    set -l cfg (set -q XDG_CONFIG_HOME; and echo $XDG_CONFIG_HOME; or echo "$HOME/.config")
+    if string match -q -- "$cfg/*" "$src"
+        string sub -s (math (string length -- "$cfg") + 2) -- "$src"
+    else if string match -q -- "$HOME/*" "$src"
+        echo "_home/"(string sub -s (math (string length -- "$HOME") + 2) -- "$src")
+    else
+        echo "_root"(string replace -r '^/+' '/' -- "$src")
+    end
+end
+
+# ── Sections ────────────────────────────────────────────────────────────────
+# Each one honours MODE: run | check | dry-run. "pending" and "failed" are
+# global counters read by the summary.
+
+function do_repos
+    heading "Git repositories"
+    set -l base "$DEST/$SUBDIR_repos"
+    test (count $S_repos_src) -gt 0; or note "(none configured)"
+    for i in (seq (count $S_repos_src))
+        set -l src $S_repos_src[$i]
+        set -l name $S_repos_name[$i]
+        set -l target "$base/$name.git"
+        refuse_link "$target"; or continue
+        if not test -d "$src"; or not command git -C "$src" rev-parse --git-dir >/dev/null 2>&1
+            item_warn "$src is not a git repository, skipped"
+            continue
+        end
+        switch $MODE
+            case check
+                if not test -d "$target"
+                    item_pending + "$name — no mirror yet"
+                    set pending 1
+                    continue
+                end
+                set -l out (command git -C "$target" fetch --dry-run origin 2>&1)
+                set -l rc $status
+                if test $rc -ne 0
+                    item_fail "$name — can't read its origin (git exited $rc)"
+                    set pending 1
+                else if test -n "$out"
+                    item_pending '~' "$name — new commits not fetched yet"
+                    set pending 1
+                else
+                    item_ok "$name (up to date)"
+                end
+            case dry-run
+                if test -d "$target"
+                    note "would update $target (git remote update)"
+                else
+                    note "would create $target (git clone --mirror $src)"
+                end
+            case run
+                if test -d "$target"
+                    if command git -C "$target" remote update >/dev/null 2>&1
+                        item_ok "$name (updated)"
+                    else
+                        item_fail "$name — git remote update failed"
+                        set failed 1
+                    end
+                else if command git clone -q --mirror -- "$src" "$target" >/dev/null 2>&1
+                    item_new "$name (first mirror)"
+                else
+                    item_fail "$name — git clone --mirror failed"
+                    set failed 1
+                end
+        end
+    end
+end
+
+# themes and dirs: rsync mirrors with the same rules
+function do_mirrors --argument-names section title
+    heading "$title"
+    set -l subdir_var SUBDIR_$section
+    set -l src_var S_{$section}_src
+    set -l name_var S_{$section}_name
+    set -l base "$DEST/$$subdir_var"
+    set -l srcs $$src_var
+    set -l names $$name_var
+    test (count $srcs) -gt 0; or note "(none configured)"
+    set -l delete_flag --delete
+    test "$DELETE" = true; or set delete_flag
+    for i in (seq (count $srcs))
+        set -l src $srcs[$i]
+        set -l name $names[$i]
+        set -l target "$base/$name"
+        refuse_link "$target"; or continue
+        if not test -d "$src"
+            item_warn "$src doesn't exist, skipped"
+            continue
+        end
+        if not test -r "$src" -a -x "$src"
+            item_fail "$name — can't read $src"
+            set failed 1
+            continue
+        end
+        switch $MODE
+            case check dry-run
+                set -l would
+                if test -d "$target"
+                    set would (command rsync -an --checksum $delete_flag (rsync_excludes) --out-format='%i %n' -- "$src/" "$target/" 2>&1 | command grep -v '^\.' )
+                else
+                    set would new
+                end
+                if test (count $would) -eq 0
+                    item_ok "$name (up to date)"
+                else if test $MODE = check
+                    if test -d "$target"
+                        item_pending '~' "$name — differs from the source ("(count $would)" change(s))"
+                    else
+                        item_pending + "$name — not backed up yet"
+                    end
+                    set pending 1
+                else
+                    if test -d "$target"
+                        note "would sync $name: "(count $would)" change(s)"
+                        for w in $would[1..10]
+                            note "  $w"
+                        end
+                        test (count $would) -gt 10; and note "  …"
+                    else
+                        note "would copy $src → $target"
+                    end
+                end
+            case run
+                if command rsync -a $delete_flag (rsync_excludes) -- "$src/" "$target/" >/dev/null 2>&1
+                    item_ok "$name"
+                else
+                    item_fail "$name — rsync failed"
+                    set failed 1
+                end
+        end
+    end
+end
+
+function do_files
+    heading "Loose files"
+    set -l base "$DEST/$SUBDIR_files"
+    test (count $S_files_src) -gt 0; or note "(none configured)"
+    for src in $S_files_src
+        if excluded_name "$src"
+            note "excluded: $src"
+            continue
+        end
+        if not test -f "$src"
+            item_warn "$src doesn't exist, skipped"
+            continue
+        end
+        set -l rel (file_rel "$src")
+        set -l target "$base/$rel"
+        refuse_link "$target"; or continue
+        switch $MODE
+            case check
+                if not test -f "$target"
+                    item_pending + "$rel — not backed up yet"
+                    set pending 1
+                else if not command cmp -s -- "$src" "$target"
+                    item_pending '~' "$rel — differs from the source"
+                    set pending 1
+                else
+                    item_ok "$rel (up to date)"
+                end
+            case dry-run
+                if not test -f "$target"; or not command cmp -s -- "$src" "$target"
+                    note "would copy $src → $target"
+                else
+                    item_ok "$rel (up to date)"
+                end
+            case run
+                if command mkdir -p -- (path dirname -- "$target"); and command cp -pL -- "$src" "$target"
+                    item_ok "$rel"
+                else
+                    item_fail "$rel — copy failed"
+                    set failed 1
+                end
+        end
+    end
+end
+
+function do_state
+    heading "System inventory"
+    set -l base "$DEST/$SUBDIR_state"
+    test (count $S_state_name) -gt 0; or note "(none configured)"
+    for i in (seq (count $S_state_name))
+        set -l name $S_state_name[$i]
+        set -l cmd $S_state_cmd[$i]
+        set -l target "$base/$name"
+        if test $MODE = dry-run
+            note "would regenerate $name from: $cmd"
+            continue
+        end
+        # Generated into a temp file first: --check can compare without
+        # writing, and a failing command never leaves a half-written backup.
+        set -l tmp (command mktemp -t diskbackup-state.XXXXXXXX)
+        if test -z "$tmp"
+            item_fail "$name — can't create a temporary file"
+            set failed 1
+            continue
+        end
+        set -ga TMPFILES $tmp
+        if not command sh -c "$cmd" >$tmp 2>/dev/null
+            item_warn "$name — the command failed, skipped"
+            command rm -f -- $tmp
+            continue
+        end
+        if test $MODE = check
+            if not test -f "$target"
+                item_pending + "$name — not backed up yet"
+                set pending 1
+            else if not command cmp -s -- $tmp "$target"
+                item_pending '~' "$name — changed since the last backup"
+                set pending 1
+            else
+                item_ok "$name (up to date)"
+            end
+            command rm -f -- $tmp
+            continue
+        end
+        if command mv -f -- $tmp "$target"
+            command chmod 644 -- "$target"
+            item_ok "$name"
+        else
+            item_fail "$name — can't write $target"
+            command rm -f -- $tmp
+            set failed 1
+        end
+    end
+end
+
+function do_snapshots
+    heading "dotbackup snapshots"
+    if test -z "$S_snapshots_from"
+        note "(none configured)"
+        return 0
+    end
+    set -l glob (test -n "$S_snapshots_glob"; and echo "$S_snapshots_glob"; or echo 'snapshot-*.tar.gz')
+    set -l newest (command find "$S_snapshots_from" -maxdepth 1 -type f -name "$glob" -printf '%T@ %p\n' 2>/dev/null | command sort -rn | command head -1 | command cut -d' ' -f2-)
+    if test -z "$newest"
+        item_warn "no snapshots in $S_snapshots_from yet"
+        return 0
+    end
+    set -l base_name (path basename -- "$newest")
+    set -l target "$DEST/$SUBDIR_snapshots/$base_name"
+    # Never pruned here: deleting from a backup is the owner's decision.
+    if test -f "$target"
+        item_ok "$base_name (already there)"
+        return 0
+    end
+    switch $MODE
+        case check
+            item_pending + "$base_name — the newest snapshot isn't copied"
+            set pending 1
+        case dry-run
+            note "would copy $newest"
+        case run
+            if command cp -a -- "$newest" "$target"
+                item_new "$base_name"
+            else
+                item_fail "copy of $base_name failed"
+                set failed 1
+            end
+    end
+end
+
+# ── Arguments ───────────────────────────────────────────────────────────────
+
+argparse --name=$PROG h/help V/version n/dry-run y/yes i/interactive q/quiet \
+    c/config= d/dest= o/only=+ e/exclude=+ require-mount= \
+    init allow-system-disk check no-delete no-require-mount pause no-color -- $argv
+or begin
+    echo "Try '$PROG --help'." >&2
+    exit $E_USAGE
+end
+if set -q _flag_help
+    usage
+    exit $E_OK
+end
+if set -q _flag_version
+    echo "$PROG $VERSION"
+    exit $E_OK
+end
+test (count $argv) -eq 0; or usage_error "unexpected argument '$argv[1]'"
+
+if test -t 1; and not set -q NO_COLOR; and not set -q _flag_no_color
+    set __color 1
+end
+set -q _flag_quiet; and set __quiet 1
+
+set -q _flag_yes; and set -q _flag_interactive; and usage_error "--yes and --interactive are mutually exclusive"
+set -q _flag_check; and set -q _flag_dry_run; and usage_error "--check and --dry-run are mutually exclusive"
+set -q _flag_init; and begin
+    set -q _flag_check; or set -q _flag_dry_run
+end; and usage_error "--init can't be combined with --check or --dry-run"
+set -q _flag_allow_system_disk; and not set -q _flag_init; and usage_error "--allow-system-disk only applies to --init"
+set -q _flag_require_mount; and set -q _flag_no_require_mount; and usage_error "--require-mount and --no-require-mount are mutually exclusive"
+
+set -g ONLY
+for s in $_flag_only
+    for part in (string split , -- $s)
+        contains -- $part $SECTIONS; or usage_error "unknown section '$part' (expected: $SECTIONS)"
+        set -a ONLY $part
+    end
+end
+
+set -g MODE run
+set -q _flag_check; and set MODE check
+set -q _flag_dry_run; and set MODE dry-run
+
+set -g INTERACTIVE 0
+if set -q _flag_interactive
+    set INTERACTIVE 1
+else if test -t 0; and not set -q _flag_yes
+    set INTERACTIVE 1
+end
+if test $MODE != run
+    set INTERACTIVE 0
+else if test $INTERACTIVE = 0; and not set -q _flag_yes
+    usage_error "stdin is not a terminal: pass --yes to back up without asking, or --interactive"
+end
+
+# ── Settings ────────────────────────────────────────────────────────────────
+
+set -l xdg_config (set -q XDG_CONFIG_HOME; and echo $XDG_CONFIG_HOME; or echo "$HOME/.config")
+set -l conf_file "$xdg_config/sumi-files/diskbackup.conf"
+set -q _flag_config; and set conf_file (expand_path $_flag_config)
+if not test -f "$conf_file"
+    err "no settings file: $conf_file"
+    echo "    start from share/examples/diskbackup.conf (docs/DISKBACKUP.md)" >&2
+    exit $E_NOINPUT
+end
+test -r "$conf_file"; or die $E_NOPERM "can't read $conf_file"
+# [state] runs commands from this file, so it must be yours and not writable
+# by anyone else — the same rule ssh applies to its config.
+set -l owner_mode (command stat -L -c '%u %a' -- "$conf_file")
+set -l owner (string split ' ' -- $owner_mode)[1]
+set -l perms (string split ' ' -- $owner_mode)[2]
+test "$owner" = (command id -u); or die $E_NOPERM "$conf_file must be owned by you"
+string match -qr '^[0-7]*[0-7][0145][0145]$' -- "$perms"; or die $E_NOPERM "$conf_file must not be writable by group or others (chmod go-w)"
+load_config "$conf_file"
+
+set -g DEST (expand_path (begin
+    set -q _flag_dest; and echo $_flag_dest; or echo $G_dest
+end))
+test -n "$DEST"; or die $E_CONFIG "no destination: set 'dest =' in [general] or pass --dest"
+string match -q -- '/*' "$DEST"; or die $E_DATA "the destination must be an absolute path: $DEST"
+set DEST (path resolve -- "$DEST")
+for forbidden in / $HOME (path resolve -- $HOME) /home /root /usr /etc /var /boot /mnt /media /run/media
+    test "$DEST" = "$forbidden"; and die $E_DATA "refusing to use $DEST itself as the destination; use a folder inside it"
+end
+
+set -g REQUIRE_MOUNT $G_require_mount
+set -q _flag_require_mount; and set REQUIRE_MOUNT (expand_path $_flag_require_mount)
+set -q _flag_no_require_mount; and set REQUIRE_MOUNT ""
+set -g DELETE $G_delete
+set -q _flag_no_delete; and set DELETE false
+set -g EXCLUDES $_flag_exclude
+
+need rsync git cmp find sort mktemp stat
+test -n "$REQUIRE_MOUNT"; and need mountpoint
+
+# Nothing may be backed up into itself, and the destination may not sit
+# inside something it mirrors (rsync would recurse into its own output).
+for src in $S_repos_src $S_themes_src $S_dirs_src
+    if is_within "$DEST" "$src"; or is_within "$src" "$DEST"
+        die $E_DATA "$src and the destination $DEST contain each other"
+    end
+end
+
+# ── Banner, mount, marker ───────────────────────────────────────────────────
+
+set -l title "diskbackup $VERSION → $DEST"
+test $MODE = check; and set title "$title (check: read-only)"
+test $MODE = dry-run; and set title "$title (dry run: nothing is written)"
+if test "$__quiet" != 1
+    echo ""
+    echo (_c --bold)"  $title"(_c normal)
+end
+
+# A missing disk leaves an empty mount point: writing there silently fills
+# the system disk. Checked in every mode — there is nothing to compare either.
+if test -n "$REQUIRE_MOUNT"
+    command mountpoint -q -- "$REQUIRE_MOUNT"
+    or die $E_FAIL "$REQUIRE_MOUNT is not mounted"
+    is_within "$DEST" "$REQUIRE_MOUNT"; or die $E_DATA "$DEST is not inside $REQUIRE_MOUNT"
+end
+
+if set -q _flag_init
+    if test -f "$DEST/$MARKER"
+        say "  $DEST is already a diskbackup destination."
+        exit $E_OK
+    end
+    set -l first_entry (command find "$DEST" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)
+    if test -n "$first_entry"
+        say "  $DEST exists and is not empty. Mirrors only ever write inside"
+        say "  its subfolders ("(string join ', ' $SUBDIR_repos $SUBDIR_themes $SUBDIR_files $SUBDIR_dirs $SUBDIR_state $SUBDIR_snapshots)")."
+    end
+    set -l marker_extra
+    if on_system_disk "$DEST"
+        if not set -q _flag_allow_system_disk
+            err "$DEST is on the system disk (same filesystem as / or \$HOME)."
+            echo "    If the backup disk is not mounted, mount it and try again: initialising" >&2
+            echo "    now would make every later run fill the system disk instead." >&2
+            echo "    To back up to the system disk on purpose: $PROG --init --allow-system-disk" >&2
+            exit $E_DATA
+        end
+        set marker_extra allow-system-disk
+    end
+    if test $INTERACTIVE = 1
+        ask "Mark $DEST as a diskbackup destination?"; or begin
+            say "  cancelled"
+            exit $E_OK
+        end
+    else if not set -q _flag_yes
+        usage_error "--init needs --yes when not interactive"
+    end
+    command mkdir -p -- "$DEST"; or die $E_CANTCREAT "can't create $DEST"
+    printf 'diskbackup destination, created %s by %s %s\n%s' (date -Iseconds) $PROG $VERSION \
+        (test -n "$marker_extra"; and printf '%s\n' $marker_extra; or echo -n) >"$DEST/$MARKER"
+    or die $E_NOPERM "can't write $DEST/$MARKER"
+    say "  ✓ $DEST is ready"
+    exit $E_OK
+end
+
+if not test -d "$DEST"
+    die $E_FAIL "$DEST doesn't exist (run '$PROG --init' once)"
+end
+test -f "$DEST/$MARKER"
+or die $E_FAIL "$DEST has no $MARKER marker; run '$PROG --init' if this is the right folder"
+if on_system_disk "$DEST"; and not command grep -qx allow-system-disk -- "$DEST/$MARKER"
+    die $E_FAIL "$DEST is on the system disk but was not initialised for it — is the backup disk mounted?"
+end
+for s in $SECTIONS
+    set -l subdir_var SUBDIR_$s
+    test -L "$DEST/$$subdir_var"; and die $E_DATA "$DEST/$$subdir_var is a symlink; refusing to write through it"
+end
+if test $MODE = run
+    test -w "$DEST"; or die $E_NOPERM "can't write to $DEST"
+end
+
+if test $MODE = run; and test $INTERACTIVE = 1
+    say ""
+    say "  Sections: "(string join ', ' (test (count $ONLY) -gt 0; and echo $ONLY; or echo $SECTIONS))
+    test "$DELETE" = true; and say "  Mirrors delete what was deleted at the source (--no-delete to keep it)."
+    ask "Start the backup?"; or begin
+        say ""
+        say "  cancelled: nothing was written"
+        exit $E_OK
+    end
+end
+
+set -g TMPFILES
+function __cleanup --on-event fish_exit
+    for f in $TMPFILES
+        test -f "$f"; and command rm -f -- "$f"
+    end
+end
+function __interrupted --on-signal INT --on-signal TERM
+    echo >&2
+    err interrupted
+    exit $E_CANCEL
+end
+
+if test $MODE = run
+    for s in $SECTIONS
+        wants $s; or continue
+        set -l subdir_var SUBDIR_$s
+        set -l dir "$DEST/$$subdir_var"
+        command mkdir -p -- "$dir"; or die $E_CANTCREAT "can't create $dir"
+    end
+end
+
+set -g pending 0
+set -g failed 0
+
+wants repos; and do_repos
+wants themes; and do_mirrors themes "Themes and icons installed by hand"
+wants files; and do_files
+wants dirs; and do_mirrors dirs Folders
+wants state; and do_state
+wants snapshots; and do_snapshots
+
+say ""
+set -l rc $E_OK
+switch $MODE
+    case check
+        if test $pending = 0
+            say (_c green)"  ✓ backup up to date — nothing pending"(_c normal)
+        else
+            echo (_c yellow)"  ⚠ changes pending — run '$PROG' to apply them"(_c normal)
+            set rc $E_PENDING
+        end
+    case dry-run
+        say "  dry run: nothing was written"
+    case run
+        set -l size (command du -sh -- "$DEST" 2>/dev/null | command cut -f1)
+        if test $failed = 0
+            say (_c green)"  ✓ diskbackup finished"(_c normal)
+        else
+            err "diskbackup finished with errors — see the ✘ lines above"
+            set rc $E_FAIL
+        end
+        say (_c brblack)"    $DEST — $size — "(date '+%Y-%m-%d %H:%M')(_c normal)
+end
+say ""
+
+if set -q _flag_pause; and test -t 0
+    read -P "  Press Enter to exit…" __discard
+end
+exit $rc

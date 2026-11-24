@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "update",
+      "label": "Update the system",
+      "desc": "Update the system (pacman + AUR)",
+      "glyph": "update",
+      "argv": [
+        "fish",
+        "-lc",
+        "sysupdate; ~/.config/hypr/scripts/updates.sh --force >/dev/null; read -P 'Press Enter to exit'"
+      ],
+      "runs": "terminal",
+      "role": "system-upgrade",
+      "requires": [
+        "pacman",
+        "~/.config/fish/functions/sysupdate.fish",
+        "~/.config/hypr/scripts/updates.sh",
+        "pkexec",
+        "~/.config/fish/conf.d/report-ui.fish"
+      ]
+    },
+    {
+      "id": "dotbackup",
+      "label": "Back up dotfiles (dotbackup)",
+      "console": "dotbackup",
+      "glyph": "folder",
+      "argv": [
+        "fish",
+        "-lc",
+        "dotbackup; read -P 'Press Enter to exit'"
+      ],
+      "runs": "terminal",
+      "title": "dotbackup",
+      "requires": [
+        "dotbackup",
+        "git",
+        "rsync"
+      ]
+    },
+    {
+      "id": "diskbackup",
+      "label": "Back up to the backup disk",
+      "console": "diskbackup",
+      "glyph": "folder",
+      "argv": [
+        "diskbackup",
+        "--yes"
+      ],
+      "runs": "panel",
+      "confirm": "Mirror the paths in ~/.config/sumi-files/diskbackup.conf to the backup disk?",
+      "successText": "Backup disk up to date"
+    },
+    {
+      "id": "clean",
+      "label": "Clean caches & trash",
+      "desc": "Clear caches & trash",
+      "glyph": "reload",
+      "argv": [
+        "fish",
+        "-lc",
+        "minimaru clean; read -P 'Enter to close'"
+      ],
+      "runs": "terminal",
+      "title": "minimaru-clean",
+      "requires": [
+        "~/.config/fish/functions/minimaru.fish",
+        "~/.config/fish/functions/quickcache.fish",
+        "~/.config/fish/conf.d/report-ui.fish"
+      ]
+    },
+    {
+      "id": "health",
+      "label": "Health check",
+      "desc": "System health check",
+      "glyph": "check-circle",
+      "argv": [
+        "fish",
+        "-c",
+        "minimaru health --json"
+      ],
+      "runs": "panel",
+      "output": "jsonl-report",
+      "summary": "~/.cache/minimaru-health-summary",
+      "requires": [
+        "~/.config/fish/functions/minimaru.fish",
+        "~/.config/fish/functions/healthcheck.fish",
+        "~/.config/fish/conf.d/report-ui.fish",
+        "rg"
+      ]
+    },
+    {
+      "id": "doctor",
+      "label": "Rice diagnostics",
+      "glyph": "gauge",
+      "argv": [
+        "fish",
+        "-c",
+        "minimaru doctor --json"
+      ],
+      "runs": "panel",
+      "output": "jsonl-report",
+      "summary": "~/.cache/minimaru-doctor-summary",
+      "requires": [
+        "~/.config/fish/functions/minimaru.fish",
+        "~/.config/fish/conf.d/report-ui.fish"
+      ]
+    }
+  ]
+}

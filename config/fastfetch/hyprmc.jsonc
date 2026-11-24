@@ -1,0 +1,109 @@
+// HyprMc · Fastfetch
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": { "source": "~/.config/fastfetch/fastfetchlogo/HyprMc.png", "type": "kitty-direct", "width": 45, "height": 20},
+  "display": { "separator": " ~> " },
+
+  "modules": [
+    {
+      "type": "custom",
+      "format": "{#36}― Diamonds & Dotfiles ―"
+    },
+    "break",
+    {
+      "type": "command",
+      "key":  "{#36}󰊗 Player",
+      "text": "test -n \"$USER_PRETTY\" && printf '%s' \"$USER_PRETTY\" || printf '%s' \"$USER\"",
+      "format": "{result}"
+    },
+    {
+      "type": "command",
+      "key":  "{#36}󰌢 World",
+      "text": "hostnamectl --pretty 2>/dev/null || hostname",
+      "format": "{result}"
+    },
+    "break",
+    {
+      "type": "os",
+      "key":    "{#33} OS",
+      "format": "{pretty-name}  {#90}[{arch}]"
+    },
+    {
+      "type": "kernel",
+      "key":    "{#33}├ Kernel",
+      "format": "{sysname}  {#90}[v{release}]"
+    },
+    {
+      "type": "packages",
+      "key":    "{#33}├󰏖 Packages",
+      "format": "{all}"
+    },
+    {
+      "type": "shell",
+      "key":    "{#33}└ Shell",
+      "format": "{pretty-name}  {#90}[v{version}]"
+    },
+    "break",
+    {
+      "type": "wm",
+      "key":    "{#34}󱂬 WM",
+      "format": "{pretty-name}"
+    },
+    {
+      "type": "terminal",
+      "key":    "{#34}├ Terminal",
+      "format": "{pretty-name}  {#90}[{version}]"
+    },
+    {
+      "type": "terminalfont",
+      "key":    "{#34}├ Font",
+      "format": "{name}  {#90}[{size}]"
+    },
+    {
+      "type": "command",
+      "key":  "{#34}└󰸉 Wallpaper",
+      "text": "awww query 2>/dev/null | sed -n 's|.*image: ||p' | head -n1 | xargs -r basename",
+      "format": "{result}"
+    },
+    "break",
+    {
+      "type": "host",
+      "key":    "{#32}󰌢 Base"
+    },
+    {
+      "type": "cpu",
+      "key":    "{#32}├󰻠 Redstone",
+      "temp": true,
+      "format": "{name}  {temperature}  {#90}[{freq-max}]"
+    },
+    {
+      "type": "gpu",
+      "key":    "{#32}├󰍛 Render",
+      "detectionMethod": "auto",
+      "driverSpecific": false,
+      "format": "{name}"
+    },
+    {
+      "type": "memory",
+      "key":    "{#32}├󰑭 Inventory",
+      "format": "{used} / {total}  {#90}({percentage}{#90})"
+    },
+    {
+      "type": "disk",
+      "folders": "/",
+      "key":    "{#32}├ Chest",
+      "format": "{size-used} / {size-total}  {#90}({size-percentage}{#90})"
+    },
+    {
+      "type": "uptime",
+      "key":    "{#32}└󰅐 Playtime",
+      "format": "{?days}{days}d {?}{hours}h {minutes}m"
+    },
+    "break",
+    {
+      "type": "colors",
+      "symbol": "circle"
+    },
+    "break"
+  ]
+}

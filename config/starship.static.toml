@@ -1,0 +1,158 @@
+"$schema" = 'https://starship.rs/config-schema.json'
+
+# ── Referencia estática de la plantilla dinámica ─────────────────
+# Gemelo de ~/.config/matugen/templates/starship.toml con la paleta fija
+# "Minimaru". hypr/scripts/apply-static-colors.sh copia ESTE archivo
+# encima de ~/.config/starship.toml al apagar matugen (SUPER+SHIFT+W), así
+# que todo cambio de estructura tiene que hacerse en los DOS archivos o se
+# pierde al primer toggle. hypr/scripts/check-template-parity.sh compara el
+# conjunto de claves de ambos.
+
+# ── Forma del prompt ────────────────────────────────────────────
+#   ┌ 󰣇 user@host  󱂵 ホーム/󰒓 設定/hypr  󰊢 main 󰏫
+#   └ $
+
+format = """
+[┌](fg:#8098a8) \
+$os\
+${env_var.USER_PRETTY}\
+[@](fg:#8098a8)\
+${env_var.HOSTNAME_PRETTY}\
+$directory\
+$git_branch\
+$git_status\
+$python\
+$nodejs\
+$rust\
+$golang\
+$cmd_duration\
+$status\
+$line_break\
+[└](fg:#8098a8) \
+$character\
+"""
+
+command_timeout = 500
+add_newline = false
+
+# ── OS ──────────────────────────────────────────────────────────
+[os]
+disabled = false
+style = "fg:#8ab0b8"
+format = "[$symbol ]($style)"
+
+[os.symbols]
+Arch        = "󰣇"
+CachyOS     = "󰣇"
+Manjaro     = "󱆅"
+Fedora      = "󰣛"
+Ubuntu      = "󰕈"
+Debian      = "󰣚"
+NixOS       = "󱄅"
+EndeavourOS = ""
+Garuda      = "󰛓"
+openSUSE    = ""
+Gentoo      = "󰣨"
+Alpine      = ""
+Unknown     = "󰌽"
+
+# ── Usuario ─────────────────────────────────────────────────────
+[env_var.USER_PRETTY]
+style = "fg:#b0d0d8 bold"
+format = "[$env_value]($style)"
+
+# ── Hostname ────────────────────────────────────────────────────
+[env_var.HOSTNAME_PRETTY]
+style = "fg:#8098a8"
+format = "[$env_value]($style)"
+
+# ── Directorio ──────────────────────────────────────────────────
+[directory]
+style = "fg:#cfbf9f bold"
+format = "  [$path]($style)[$read_only]($read_only_style)"
+read_only_style = "fg:#b85c50"
+truncate_to_repo = false
+home_symbol = "~ ホーム"
+read_only = " 󰌾 読取専用"
+truncation_length = 4
+truncation_symbol = "…/"
+
+[directory.substitutions]
+"Desktop"   = "󰇄 デスクトップ"
+"Documents" = "󰈙 ドキュメント"
+"Downloads" = "󰇚 ダウンロード"
+"Music"     = "󰎈 音楽"
+"Pictures"  = "󰏏 写真"
+"Videos"    = "󰕧 ビデオ"
+"Projects"  = "󱌢 プロジェクト"
+"GitHub"    = "󰊤 ギットハブ"
+"Code"      = "󰨞 コード"
+".config"   = "󰒓 設定"
+
+# ── Git branch ──────────────────────────────────────────────────
+[git_branch]
+symbol = "󰊢"
+style = "fg:#d8d8d8 bold"
+truncation_length = 18
+format = "  [$symbol $branch]($style)"
+
+# ── Git status ──────────────────────────────────────────────────
+[git_status]
+style = "fg:#b85c50 bold"
+format = "([ $all_status$ahead_behind]($style))"
+conflicted = "󰞇 "
+ahead      = "⇡${count}"
+behind     = "⇣${count}"
+diverged   = "⇕"
+untracked  = "󰋗 "
+stashed    = "󰆼"
+modified   = "󰏫 "
+staged     = "󰐗 "
+renamed    = "󰕚 "
+deleted    = "󰍶 "
+
+# ── Lenguajes ───────────────────────────────────────────────────
+[python]
+symbol = ""
+style = "fg:#cfbf9f bold"
+format = "  [$symbol $version]($style)"
+
+[nodejs]
+symbol = ""
+style = "fg:#b0d0d8 bold"
+format = "  [$symbol $version]($style)"
+
+[rust]
+symbol = "󱘗"
+style = "fg:#d8c098 bold"
+format = "  [$symbol $version]($style)"
+
+[golang]
+symbol = ""
+style = "fg:#9ab0a0 bold"
+format = "  [$symbol $version]($style)"
+
+# ── Extras ───────────────────────────────────────────────────────
+[cmd_duration]
+min_time = 2000
+show_milliseconds = false
+style = "fg:#8098a8 italic"
+format = "  [󰔚 $duration]($style)"
+
+[status]
+disabled = false
+style = "fg:#b85c50 bold"
+format = "  [󰅚 $status]($style)"
+
+[character]
+success_symbol = '[\$](fg:#dee3e6 bold)'
+error_symbol   = '[\$](fg:#b85c50 bold)'
+
+[package]
+disabled = true
+[memory_usage]
+disabled = true
+[time]
+disabled = true
+[line_break]
+disabled = false

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  hooks/git/pre-commit — the same privacy and secret checks dotbackup runs,
+#  for every commit made in this repository, including a plain `git commit`
+#  after `dotbackup --no-commit` or a manual edit.
+#  Enable once per clone:   git config core.hooksPath hooks/git
+#  (Bypassing with `git commit --no-verify` is possible and deliberate.)
+# ============================================================================
+set -u
+repo="$(git rev-parse --show-toplevel)" || exit 1
+
+# 1. Secrets in what is staged
+if command -v gitleaks >/dev/null 2>&1; then
+    if gitleaks git --help >/dev/null 2>&1; then
+        gitleaks git --staged --no-banner --redact -l error "$repo" || exit 1
+    else
+        gitleaks protect --staged --no-banner --redact -l error --source "$repo" || exit 1
+    fi
+else
+    pattern='AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}'
+    if git -C "$repo" diff --cached -U0 | grep -nE "^\+.*($pattern)" >&2; then
+        echo "  ✘ possible secret in the staged changes" >&2
+        exit 1
+    fi
+fi
+
+# 2. Personal data (home path, login name, private-patterns)
+DOTBACKUP_REPO="$repo" "$repo/hooks/dotbackup/10-privacy.sh" || exit 1
+
+# 3. Generated or private files that must never be versioned, even if a
+#    .gitignore rule was edited away
+bad="$(git -C "$repo" diff --cached --name-only --diff-filter=A | grep -v '/templates/' | grep -E \
+    '(^|/)(private\.lua|local\.fish|fish_variables|\.current-wallpaper[^/]*|colors\.conf|colors\.lua|dynamic-colors\.sh|gtk-colors\.css|minimaru\.conf|music-colors\.sh|sumi-shell-fonts\.conf|\.fastfetch_bag)$|^config/starship\.toml$')"
+if [ -n "$bad" ]; then
+    printf '%s\n' "$bad" >&2
+    echo "  ✘ generated or private files staged (see .gitignore)" >&2
+    exit 1
+fi
+exit 0

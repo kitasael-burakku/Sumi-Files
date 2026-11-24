@@ -1,0 +1,6 @@
+[Unit]
+Description=Notify when ~/.config drifted from the dotfiles repository (read-only, never syncs)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/hypr/scripts/dotbackup-remind.sh

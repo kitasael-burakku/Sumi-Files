@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresca el cache de actualizaciones pendientes (pacman+AUR)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/hypr/scripts/updates.sh --force
+# La señal 8 a Waybar (`pkill -RTMIN+8 waybar`) se fue con la barra en la
+# Fase 11: Sumi Shell vigila el archivo de caché con FileView(watchChanges),
+# así que no hay a quién avisar.
+# En background y con setsid (no bloquea este ExecStartPost, ni depende del
+# cgroup del servicio oneshot que ya terminó): notify-send --action implica
+# --wait, y puede quedar esperando un click del usuario durante rato largo.
+ExecStartPost=/usr/bin/bash -c 'setsid %h/.config/hypr/scripts/updates-notify-actionable.sh >/dev/null 2>&1 &'

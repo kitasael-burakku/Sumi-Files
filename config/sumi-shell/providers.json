@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "wallpaper": {
+    "label": "apply-wallpaper.sh",
+    "scripts": [
+      {
+        "argv": [
+          "bash",
+          "~/.config/hypr/scripts/apply-wallpaper.sh"
+        ],
+        "supports": [
+          "apply",
+          "applyOutput",
+          "clear",
+          "sync",
+          "restore",
+          "transition"
+        ]
+      },
+      {
+        "argv": [
+          "bash",
+          "~/.config/hypr/scripts/wallpaper-video-pause.sh"
+        ],
+        "supports": [
+          "pauseStatus",
+          "pauseRestore"
+        ]
+      }
+    ],
+    "lockStill": "~/.config/hyprlock/wallpapers/current.png"
+  },
+  "theme": {
+    "label": "matugen (dotfiles)",
+    "scripts": [
+      {
+        "argv": [
+          "bash",
+          "~/.config/hypr/scripts/matugen_reload.sh"
+        ],
+        "supports": [
+          "reload"
+        ]
+      },
+      {
+        "argv": [
+          "bash",
+          "~/.config/hypr/scripts/matugen_toggle.sh"
+        ],
+        "supports": [
+          "toggle"
+        ]
+      },
+      {
+        "argv": [
+          "bash",
+          "~/.config/hypr/scripts/apply-static-colors.sh"
+        ],
+        "supports": [
+          "staticList"
+        ]
+      }
+    ],
+    "matugenConfig": "~/.config/matugen/config.toml",
+    "xsettingsConfig": "~/.config/sumi-shell/xsettings-managed.conf"
+  },
+  "thumbnails": {
+    "label": "thumbs-refresh.service",
+    "scripts": [
+      {
+        "argv": [
+          "systemctl",
+          "--user",
+          "start",
+          "thumbs-refresh.service"
+        ],
+        "supports": [
+          "refresh"
+        ]
+      }
+    ]
+  },
+  "updates": {
+    "label": "pacman + AUR",
+    "scripts": [
+      {
+        "argv": [
+          "systemctl",
+          "--user",
+          "start",
+          "updates-check.service"
+        ],
+        "supports": [
+          "check"
+        ]
+      },
+      {
+        "argv": [
+          "~/.config/hypr/scripts/updates.sh"
+        ],
+        "supports": [
+          "list"
+        ]
+      }
+    ]
+  }
+}

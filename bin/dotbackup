@@ -1,0 +1,1022 @@
+#!/usr/bin/env -S fish --no-config
+# SPDX-License-Identifier: MIT
+# ============================================================================
+#  dotbackup — mirror the files listed in a manifest from your live config
+#  (~/.config by default) into a dotfiles git repository, then optionally
+#  commit and push. Part of Sumi-Files; full manual in docs/DOTBACKUP.md.
+# ----------------------------------------------------------------------------
+#  Pipeline: validate → stage (temp copy + home-path normalisation) → compare
+#  → confirm → snapshot → apply → hooks → review → secret scan → commit → push.
+#  Every step before "apply" is read-only, which is what --check and
+#  --dry-run stop at.
+#
+#  Runs with --no-config on purpose: user functions and aliases (ls → eza,
+#  grep → ugrep…) must never change how a backup tool behaves.
+# ============================================================================
+
+set -g VERSION 1.0.0
+set -g PROG dotbackup
+
+# Exit codes (sysexits.h where one fits). Documented in docs/DOTBACKUP.md.
+set -g E_OK 0
+set -g E_FAIL 1
+set -g E_PENDING 2
+set -g E_USAGE 64
+set -g E_DATA 65
+set -g E_NOINPUT 66
+set -g E_UNAVAILABLE 69
+set -g E_CANTCREAT 73
+set -g E_NOPERM 77
+set -g E_CONFIG 78
+set -g E_CANCEL 130
+
+# ── Output ──────────────────────────────────────────────────────────────────
+
+set -g __color 0
+set -g __quiet 0
+
+# Always prints exactly one element: an empty command substitution would
+# otherwise erase the whole word it is concatenated with.
+function _c
+    if test "$__color" = 1
+        set_color $argv
+    else
+        echo
+    end
+end
+
+function say
+    test "$__quiet" = 1; and return 0
+    echo $argv
+end
+
+function note
+    test "$__quiet" = 1; and return 0
+    echo (_c brblack)"  $argv"(_c normal)
+end
+
+function ok
+    test "$__quiet" = 1; and return 0
+    echo (_c green)"  ✓ $argv"(_c normal)
+end
+
+function warn
+    echo (_c yellow)"  ⚠ $argv"(_c normal) >&2
+end
+
+function err
+    echo (_c red)"  ✘ $argv"(_c normal) >&2
+end
+
+function die --argument-names code
+    err $argv[2..-1]
+    exit $code
+end
+
+function heading
+    test "$__quiet" = 1; and return 0
+    echo ""
+    echo (_c --bold)"  $argv"(_c normal)
+end
+
+function usage
+    echo "Usage: $PROG [OPTIONS]
+
+Mirror the paths listed in a manifest from your live config into a dotfiles
+git repository, then optionally commit and push.
+
+Locations:
+  -s, --source DIR        live config root          (default: \$XDG_CONFIG_HOME or ~/.config)
+  -r, --repo DIR          dotfiles repository       (default: see 'Finding the repository')
+  -m, --manifest FILE     what to mirror            (default: <repo>/sumi-files.list)
+      --payload SUBDIR    repo folder that mirrors the source (default: config)
+  -c, --config FILE       settings file             (default: ~/.config/sumi-files/dotbackup.conf)
+      --hooks-dir DIR     post-sync checks          (default: <repo>/hooks/dotbackup)
+      --snapshot-dir DIR  safety tarballs           (default: \$XDG_CACHE_HOME/dotbackup/snapshots)
+
+Behaviour:
+  -n, --dry-run           show what would change; write nothing
+      --check             exit 2 if the repo is behind the source, 0 if not; write nothing
+  -y, --yes               non-interactive: sync without asking (commit/push still need flags)
+  -i, --interactive       ask every question, even when stdin is not a terminal
+      --commit            create a commit after syncing
+      --no-commit         sync only; never commit
+      --push              push after committing (requires --commit when not interactive)
+  -M, --message TEXT      commit message           (default: 'dotfiles: backup <date>')
+  -b, --branch NAME       required current branch  (default: main; '' disables the check)
+      --remote NAME       remote to push to        (default: origin)
+      --expect-remote PAT refuse to run unless the remote URL matches this glob
+  -e, --exclude PATTERN   rsync exclude pattern, repeatable
+      --no-default-excludes  drop the built-in excludes (__pycache__, *.pyc, *.swp, *~)
+      --no-delete         never delete files from the repo
+      --no-snapshot       skip the safety tarball
+      --keep N            snapshots to keep         (default: 5)
+      --no-normalize-home store literal home paths instead of @HOME@
+      --skip-hooks        do not run the hooks
+  -q, --quiet             only warnings and errors
+      --no-color          plain output (also honoured: NO_COLOR)
+  -h, --help              this help
+  -V, --version           print the version
+
+Finding the repository: --repo, then \$SUMI_FILES_DIR, then 'repo =' in the
+settings file, then the git repository this script lives in.
+
+Exit codes: 0 ok · 1 failed · 2 --check: drift · 64 usage · 65 bad data
+            66 missing path · 69 missing dependency · 73 can't create
+            77 permission denied · 78 bad settings file · 130 cancelled"
+end
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+# Expand a leading ~ or $HOME. Nothing else is expanded: settings are data.
+function expand_path --argument-names p
+    set p (string replace -r '^~(?=/|$)' -- "$HOME" "$p")
+    set p (string replace -r '^\$HOME(?=/|$)' -- "$HOME" "$p")
+    set p (string replace -r '^\$\{HOME\}(?=/|$)' -- "$HOME" "$p")
+    printf '%s\n' "$p"
+end
+
+function abspath --argument-names p
+    path resolve -- "$p"
+end
+
+# true if $argv[1] is $argv[2] or lives inside it
+function is_within --argument-names child parent
+    set child (abspath "$child")
+    set parent (abspath "$parent")
+    test "$child" = "$parent"; and return 0
+    string match -q -- "$parent/*" "$child"
+end
+
+function need
+    for cmd in $argv
+        command -q $cmd; or die $E_UNAVAILABLE "missing dependency: $cmd"
+    end
+end
+
+# A relative path that never climbs out of its root.
+function safe_rel --argument-names p
+    test -n "$p"; or return 1
+    string match -qr '^/' -- "$p"; and return 1
+    string match -qr '(^|/)\.\.(/|$)' -- "$p"; and return 1
+    string match -qr '^\./?$|^/?$' -- "$p"; and return 1
+    # writing into .git (hooks, config) would be code execution on the next git command
+    string match -qr '(^|/)\.git(/|$)' -- "$p"; and return 1
+    return 0
+end
+
+# Ask a yes/no question. Default answer is "no" unless $argv[2] = y.
+function ask --argument-names question default
+    set -l hint "[y/N]"
+    test "$default" = y; and set hint "[Y/n]"
+    if test -t 0
+        printf '%s %s ' (_c --bold)"  $question"(_c normal) $hint >&2
+    else
+        # A newline, not a bare prompt: a frontend reading line by line never
+        # sees a question that has no line break.
+        printf '%s %s\n' "  $question" $hint >&2
+    end
+    read -l reply
+    or begin
+        echo >&2
+        die $E_CANCEL "cancelled (end of input)"
+    end
+    set reply (string trim -- "$reply")
+    test -z "$reply"; and set reply $default
+    string match -qir '^(y|yes)$' -- "$reply"
+end
+
+function ask_text --argument-names question default
+    printf '%s\n' "  $question" >&2
+    printf '%s\n' (_c brblack)"  (Enter for: $default)"(_c normal) >&2
+    printf '  > ' >&2
+    read -l reply
+    or die $E_CANCEL "cancelled (end of input)"
+    set reply (string trim -- "$reply")
+    test -z "$reply"; and set reply $default
+    printf '%s\n' "$reply"
+end
+
+# ── Settings file (key = value; parsed, never sourced) ─────────────────────
+
+set -g CONF_KEYS repo source manifest payload branch remote expect_remote \
+    snapshot_dir keep exclude hooks_dir normalize_home default_excludes
+function load_config --argument-names file
+    set -l n 0
+    for line in (command cat -- "$file")
+        set n (math $n + 1)
+        set line (string trim -- (string replace -r '^\s*#.*$' '' -- "$line"))
+        test -n "$line"; or continue
+        set -l kv (string split -m1 '=' -- "$line")
+        if test (count $kv) -ne 2
+            die $E_CONFIG "$file:$n: expected 'key = value'"
+        end
+        set -l key (string trim -- $kv[1])
+        set -l val (string trim -- $kv[2])
+        set val (string trim -c '"' -- "$val")
+        contains -- $key $CONF_KEYS; or die $E_CONFIG "$file:$n: unknown key '$key'"
+        if test "$key" = exclude
+            set -ga conf_exclude "$val"
+        else
+            set -g conf_$key "$val"
+        end
+    end
+end
+
+# ── Manifest ───────────────────────────────────────────────────────────────
+# One entry per line:  path/  (directory)   path  (file)   src => dst
+# src is relative to the source root, or to $HOME when it starts with ~/.
+# dst is always relative to the payload folder. Fills the global lists
+# M_KIND (d|f), M_SRC (absolute), M_DST (relative to payload).
+function load_manifest --argument-names file
+    set -g M_KIND
+    set -g M_SRC
+    set -g M_DST
+    set -l n 0
+    set -l bad 0
+    for line in (command cat -- "$file")
+        set n (math $n + 1)
+        set line (string trim -- (string replace -r '(^|\s)#.*$' '' -- "$line"))
+        test -n "$line"; or continue
+        set -l parts (string split -m1 '=>' -- "$line")
+        set -l src (string trim -- $parts[1])
+        set -l dst $src
+        if test (count $parts) -eq 2
+            set dst (string trim -- $parts[2])
+        end
+        set -l kind f
+        string match -q -- '*/' "$src"; and set kind d
+        set -l dkind f
+        string match -q -- '*/' "$dst"; and set dkind d
+        set src (string trim -r -c / -- "$src")
+        set dst (string trim -r -c / -- (string replace -r '^~/' '' -- "$dst"))
+        set -l base "$SOURCE"
+        set -l rel "$src"
+        if string match -q -- '~/*' "$src"
+            set base "$HOME"
+            set rel (string sub -s 3 -- "$src")
+        end
+        if test "$kind" != "$dkind"; or not safe_rel "$rel"; or not safe_rel "$dst"
+            err "$file:$n: invalid entry '$line'"
+            set bad 1
+            continue
+        end
+        if contains -- "$dst" $M_DST
+            err "$file:$n: '$dst' is listed twice"
+            set bad 1
+            continue
+        end
+        set -l nested 0
+        for j in (seq (count $M_DST))
+            if test $M_KIND[$j] = d; and string match -q -- "$M_DST[$j]/*" "$dst"
+                set nested 1
+            else if test $kind = d; and string match -q -- "$dst/*" "$M_DST[$j]"
+                set nested 1
+            end
+        end
+        if test $nested = 1
+            err "$file:$n: '$dst' overlaps another directory entry"
+            set bad 1
+            continue
+        end
+        set -ga M_KIND $kind
+        set -ga M_SRC "$base/$rel"
+        set -ga M_DST "$dst"
+    end
+    test $bad = 0; or exit $E_DATA
+    test (count $M_DST) -gt 0; or die $E_DATA "$file lists nothing to back up"
+end
+
+# ── Staging ─────────────────────────────────────────────────────────────────
+# Copies every listed path into $STAGE (a private temp dir) with the excludes
+# applied, then normalises the home path. Everything that compares or writes
+# reads from $STAGE, so --check, --dry-run and the real run see the same thing.
+
+# Exclude patterns use rsync syntax. A pattern without an inner '/' applies
+# everywhere ('*.pyc'). A pattern with one is a path relative to the source
+# root ('hypr/modules/private.lua') and only applies to the entry it starts
+# with, anchored there.
+function rsync_excludes --argument-names entry
+    for l in $LINKED
+        string match -q -- "$entry/*" "$l"
+        and printf '%s\n' --exclude=/(string sub -s (math (string length -- "$entry") + 2) -- "$l")
+    end
+    for p in $EXCLUDES
+        set -l inner (string trim -r -c / -- "$p")
+        if not string match -q -- '*/*' "$inner"
+            printf '%s\n' "--exclude=$p"
+        else if string match -q -- "$entry/*" "$p"
+            printf '%s\n' --exclude=/(string sub -s (math (string length -- "$entry") + 2) -- "$p")
+        end
+    end
+end
+
+function excluded_file --argument-names rel
+    set -l name (path basename -- "$rel")
+    for p in $EXCLUDES
+        set p (string trim -r -c / -- "$p")
+        if string match -q -- '*/*' "$p"
+            string match -q -- "$p" "$rel"; and return 0
+        else
+            string match -q -- "$p" "$name"; and return 0
+        end
+    end
+    return 1
+end
+
+function stage
+    set -g MISSING_DIRS
+    set -g MISSING_FILES
+    set -g EXCLUDED_FILES
+    for i in (seq (count $M_DST))
+        set -l src $M_SRC[$i]
+        set -l dst "$STAGE/$M_DST[$i]"
+        if test $M_KIND[$i] = d
+            if not test -d "$src"
+                set -ga MISSING_DIRS $M_DST[$i]
+                continue
+            end
+            test -r "$src" -a -x "$src"; or die $E_NOPERM "can't read $src"
+            command mkdir -p -- "$dst"
+            command rsync -a (rsync_excludes $M_DST[$i]) -- "$src/" "$dst/"
+            or die $E_FAIL "rsync failed while reading $src"
+            resolve_repo_links "$src" "$dst" $M_DST[$i]
+        else
+            # already the repository's own file (install.sh --link): never
+            # staged, compared or written — writing it would write the live file
+            contains -- $M_DST[$i] $LINKED; and continue
+            if excluded_file "$M_DST[$i]"
+                set -ga EXCLUDED_FILES $M_DST[$i]
+                continue
+            end
+            if not test -f "$src"
+                set -ga MISSING_FILES $M_DST[$i]
+                continue
+            end
+            test -r "$src"; or die $E_NOPERM "can't read $src"
+            command mkdir -p -- (path dirname -- "$dst")
+            command cp -p -- "$src" "$dst"; or die $E_FAIL "can't copy $src"
+        end
+    end
+    test "$NORMALIZE_HOME" = 1; and normalize_home "$STAGE"
+end
+
+# Symlinks in the source that point into the repository (install.sh --link
+# creates exactly those). Staged as links, rsync would replace the repository
+# file with a link to itself and its content would be lost.
+#  - pointing at the same payload path: the file IS the repository copy, so it
+#    is recorded in LINKED and left out of staging, comparison and writing;
+#  - pointing elsewhere in the repository: staged as the content it points to.
+function resolve_repo_links --argument-names src dst entry
+    for link in (command find "$dst" -type l)
+        set -l rel (string replace -- "$dst/" '' "$link")
+        set -l real (path resolve -- "$src/$rel")
+        is_within "$real" "$REPO"; or continue
+        command rm -f -- "$link"
+        if test "$real" = (path resolve -- "$PAYLOAD/$entry/$rel")
+            set -ga LINKED "$entry/$rel"
+        else if test -d "$real"
+            command mkdir -p -- "$link"
+            command cp -a -- "$real/." "$link/"; or die $E_FAIL "can't copy $real"
+        else if test -f "$real"
+            command cp -p -- "$real" "$link"; or die $E_FAIL "can't copy $real"
+        end
+    end
+end
+
+# $HOME escaped for an ERE (and for sed with '#' as the delimiter)
+function home_ere
+    string replace -r -a '([][\\\\.^$*+?(){}|/#])' '\\\\$1' -- "$HOME"
+end
+
+# Replace the literal home path with @HOME@ in text files, only where it is a
+# whole path component (so /home/al never rewrites /home/alice).
+function normalize_home --argument-names root
+    set -l esc (home_ere)
+    set -l files (command find "$root" -type f -print0 | command xargs -0r grep -lIF -- "$HOME" 2>/dev/null)
+    for f in $files
+        command sed -i -E "s#$esc([^A-Za-z0-9_.-]|\$)#@HOME@\\1#g" -- "$f"
+        or die $E_FAIL "can't normalise $f"
+    end
+end
+
+# ── Comparison ──────────────────────────────────────────────────────────────
+# Fills CHANGES with "+ path", "~ path" or "- path" (relative to the repo).
+
+function compare
+    set -g CHANGES
+    set -l delete_flag --delete
+    test "$NO_DELETE" = 1; and set delete_flag
+    for i in (seq (count $M_DST))
+        set -l rel $M_DST[$i]
+        set -l repo_path "$PAYLOAD/$rel"
+        if test $M_KIND[$i] = d
+            contains -- $rel $MISSING_DIRS; and continue
+            if not test -d "$repo_path"
+                for f in (command find "$STAGE/$rel" \( -type f -o -type l \) | command sort)
+                    set -ga CHANGES "+ $PAYLOAD_REL/"(string replace -- "$STAGE/" '' "$f")
+                end
+                continue
+            end
+            for line in (command rsync -n -a -c $delete_flag (rsync_excludes $rel) --out-format='%i|%n' -- "$STAGE/$rel/" "$repo_path/")
+                set -l item (string split -m1 '|' -- "$line")
+                set -l flags $item[1]
+                set -l name $item[2]
+                string match -q -- '*/' "$name"; and continue
+                set -l path "$PAYLOAD_REL/$rel/$name"
+                if string match -qr '^\*deleting' -- "$flags"
+                    set -ga CHANGES "- $path"
+                else if string match -qr '^[<>ch]f\+{9}|^c[LDS]\+' -- "$flags"
+                    set -ga CHANGES "+ $path"
+                else if string match -q -- '.*' "$flags"
+                    # attribute-only change: git only tracks the exec bit
+                    test (string sub -s 6 -l 1 -- "$flags") = p; and set -ga CHANGES "~ $path"
+                else
+                    set -ga CHANGES "~ $path"
+                end
+            end
+        else
+            contains -- $rel $EXCLUDED_FILES $LINKED; and continue
+            if contains -- $rel $MISSING_FILES
+                if test -e "$repo_path"; and test "$NO_DELETE" != 1
+                    set -ga CHANGES "- $PAYLOAD_REL/$rel"
+                end
+                continue
+            end
+            if not test -e "$repo_path"
+                set -ga CHANGES "+ $PAYLOAD_REL/$rel"
+            else if not command cmp -s -- "$STAGE/$rel" "$repo_path"
+                set -ga CHANGES "~ $PAYLOAD_REL/$rel"
+            end
+        end
+    end
+    # Tracked files under a folder the manifest lists file by file, but that
+    # are no longer listed: the mirror removes them (mirror semantics, like
+    # rsync --delete does for whole directories).
+    test "$NO_DELETE" = 1; and return 0
+    set -l parents
+    for i in (seq (count $M_DST))
+        test $M_KIND[$i] = f; or continue
+        set -l parent (path dirname -- $M_DST[$i])
+        test "$parent" = .; and continue
+        set -l inside_dir 0
+        for j in (seq (count $M_DST))
+            test $M_KIND[$j] = d; or continue
+            is_within "$PAYLOAD/$parent" "$PAYLOAD/$M_DST[$j]"; and set inside_dir 1
+        end
+        test $inside_dir = 0; and set -a parents "$PAYLOAD_REL/$parent"
+    end
+    set parents (printf '%s\n' $parents | command sort -u)
+    test (count $parents) -gt 0; or return 0
+    for tracked in (command git -C "$REPO" ls-files -- $parents)
+        set -l rel (string replace -- "$PAYLOAD_REL/" '' "$tracked")
+        contains -- "$rel" $M_DST; and continue
+        # a file inside a listed directory is handled by rsync above
+        set -l under_dir 0
+        for j in (seq (count $M_DST))
+            test $M_KIND[$j] = d; and string match -q -- "$M_DST[$j]/*" "$rel"; and set under_dir 1
+        end
+        test $under_dir = 1; and continue
+        test -e "$REPO/$tracked"; and set -ga CHANGES "- $tracked"
+    end
+end
+
+function print_changes
+    test "$__quiet" = 1; and return 0
+    for c in $CHANGES
+        set -l sign (string sub -l 1 -- "$c")
+        set -l color normal
+        switch $sign
+            case +
+                set color green
+            case '~'
+                set color yellow
+            case -
+                set color red
+        end
+        echo (_c $color)"    $c"(_c normal)
+    end
+end
+
+# ── Apply ───────────────────────────────────────────────────────────────────
+
+function apply
+    set -l delete_flag --delete
+    test "$NO_DELETE" = 1; and set delete_flag
+    for i in (seq (count $M_DST))
+        set -l rel $M_DST[$i]
+        set -l repo_path "$PAYLOAD/$rel"
+        if test $M_KIND[$i] = d
+            contains -- $rel $MISSING_DIRS; and continue
+            command mkdir -p -- "$repo_path"; or die $E_CANTCREAT "can't create $repo_path"
+            command rsync -a -c $delete_flag (rsync_excludes $rel) -- "$STAGE/$rel/" "$repo_path/"
+            or die $E_FAIL "rsync failed while writing $repo_path"
+        else if contains -- $rel $EXCLUDED_FILES $LINKED
+            continue
+        else if contains -- $rel $MISSING_FILES
+            if test -e "$repo_path"; and test "$NO_DELETE" != 1
+                command rm -f -- "$repo_path"; or die $E_FAIL "can't remove $repo_path"
+            end
+        else if not command cmp -s -- "$STAGE/$rel" "$repo_path" 2>/dev/null
+            command mkdir -p -- (path dirname -- "$repo_path")
+            or die $E_CANTCREAT "can't create "(path dirname -- "$repo_path")
+            command cp -p -- "$STAGE/$rel" "$repo_path"; or die $E_FAIL "can't write $repo_path"
+        end
+    end
+    # de-listed tracked files collected by compare()
+    for c in $CHANGES
+        string match -q -- '- *' "$c"; or continue
+        set -l p (string sub -s 3 -- "$c")
+        test -e "$REPO/$p"; and command rm -f -- "$REPO/$p"
+    end
+end
+
+function snapshot
+    # the working tree may hold ignored, private files: keep the tarballs private
+    set -l old_umask (umask)
+    umask 077
+    command mkdir -p -- "$SNAPSHOT_DIR"; or die $E_CANTCREAT "can't create $SNAPSHOT_DIR"
+    test -w "$SNAPSHOT_DIR"; or die $E_NOPERM "can't write to $SNAPSHOT_DIR"
+    set -l name (path basename -- "$REPO")
+    set -l stamp (date +%Y%m%d-%H%M%S)
+    set -l file "$SNAPSHOT_DIR/snapshot-$name-$stamp.tar.gz"
+    set -l n 1
+    while test -e "$file"
+        set n (math $n + 1)
+        set file "$SNAPSHOT_DIR/snapshot-$name-$stamp-$n.tar.gz"
+    end
+    # --exclude before the operand: GNU tar only applies it to names after it.
+    command tar -czf "$file" --exclude=.git -C (path dirname -- "$REPO") -- "$name"
+    or die $E_FAIL "can't write the snapshot $file"
+    umask $old_umask
+    note "snapshot: $file"
+    test "$KEEP" -gt 0; or return 0 # 0 = never prune
+    set -l old (command find "$SNAPSHOT_DIR" -maxdepth 1 -type f -name "snapshot-$name-*.tar.gz" -printf '%T@ %p\n' | command sort -rn | command tail -n +(math $KEEP + 1) | command cut -d' ' -f2-)
+    for f in $old
+        command rm -f -- "$f"
+    end
+    test (count $old) -gt 0; and note "pruned "(count $old)" old snapshot(s), keeping $KEEP"
+    return 0
+end
+
+function run_hooks
+    test "$SKIP_HOOKS" = 1; and return 0
+    test -d "$HOOKS_DIR"; or return 0
+    for hook in (command find "$HOOKS_DIR" -maxdepth 1 -type f -perm -u+x | command sort)
+        note "hook: "(path basename -- "$hook")
+        env DOTBACKUP_REPO="$REPO" DOTBACKUP_PAYLOAD="$PAYLOAD" DOTBACKUP_SOURCE="$SOURCE" \
+            DOTBACKUP_VERSION="$VERSION" "$hook"
+        or die $E_FAIL "hook "(path basename -- "$hook")" failed: files were synced, nothing was committed"
+    end
+end
+
+# ── Secret and privacy scan of what is about to be committed ───────────────
+
+function secret_scan
+    if command -q gitleaks
+        set -l rc 0
+        if command gitleaks git --help >/dev/null 2>&1
+            command gitleaks git --staged --no-banner --redact -l error "$REPO"
+            set rc $status
+        else
+            command gitleaks protect --staged --no-banner --redact -l error --source "$REPO"
+            set rc $status
+        end
+        test $rc = 0; or return 1
+    else
+        note "gitleaks not installed: using the built-in patterns (install gitleaks for better coverage)"
+        set -l pattern 'AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}'
+        set -l hits (command git -C "$REPO" diff --cached -U0 | command grep -nE "^\+.*($pattern)")
+        if test (count $hits) -gt 0
+            printf '%s\n' $hits >&2
+            return 1
+        end
+    end
+    # The literal home path is personal data (it carries the user name).
+    set -l home_hits (command git -C "$REPO" diff --cached -U0 | command grep -E '^\+' | command grep -v '^+++' | command grep -E -- (home_ere)'([^A-Za-z0-9_.-]|$)')
+    if test (count $home_hits) -gt 0
+        if test "$NORMALIZE_HOME" = 1
+            printf '%s\n' $home_hits[1..5] >&2
+            err "staged lines contain your home path ($HOME)"
+            return 1
+        else
+            warn "staged lines contain your home path ($HOME); --no-normalize-home is set, continuing"
+        end
+    end
+    return 0
+end
+
+function informational_checks
+    # templates (matugen and similar) aren't valid scripts until rendered
+    set -l staged_sh (command git -C "$REPO" diff --cached --name-only --diff-filter=ACM -- '*.sh' ':!:*/templates/*')
+    if test (count $staged_sh) -gt 0; and command -q shellcheck
+        set -l out (command shellcheck -S warning -- $REPO/$staged_sh 2>&1)
+        if test -n "$out"
+            warn "shellcheck (informational, does not block):"
+            printf '%s\n' $out[1..40] >&2
+        end
+    end
+    for f in (command git -C "$REPO" diff --cached --name-only --diff-filter=ACM -- '*.fish' ':!:*/templates/*')
+        command fish --no-config -n -- "$REPO/$f" 2>/dev/null
+        or warn "fish -n reports a syntax error in $f (informational)"
+    end
+end
+
+# ── Arguments ───────────────────────────────────────────────────────────────
+
+function _validate_keep
+    string match -qr '^[0-9]+$' -- "$_flag_value"; and return 0
+    echo "$PROG: --keep expects a non-negative integer" >&2
+    return 1
+end
+
+argparse --name=$PROG \
+    h/help V/version n/dry-run y/yes i/interactive q/quiet \
+    s/source= r/repo= m/manifest= c/config= M/message= b/branch= e/exclude=+ \
+    payload= hooks-dir= snapshot-dir= remote= expect-remote= 'keep=!_validate_keep' \
+    check commit no-commit push no-delete no-snapshot no-normalize-home skip-hooks \
+    no-default-excludes no-color \
+    -- $argv
+or begin
+    echo "Try '$PROG --help'." >&2
+    exit $E_USAGE
+end
+
+if set -q _flag_help
+    usage
+    exit $E_OK
+end
+if set -q _flag_version
+    echo "$PROG $VERSION"
+    exit $E_OK
+end
+if test (count $argv) -gt 0
+    echo "$PROG: unexpected argument '$argv[1]'" >&2
+    echo "Try '$PROG --help'." >&2
+    exit $E_USAGE
+end
+
+if test -t 1; and not set -q NO_COLOR; and not set -q _flag_no_color
+    set __color 1
+end
+set -q _flag_quiet; and set __quiet 1
+
+function usage_error
+    echo "$PROG: $argv" >&2
+    echo "Try '$PROG --help'." >&2
+    exit $E_USAGE
+end
+
+set -q _flag_yes; and set -q _flag_interactive; and usage_error "--yes and --interactive are mutually exclusive"
+set -q _flag_commit; and set -q _flag_no_commit; and usage_error "--commit and --no-commit are mutually exclusive"
+set -q _flag_push; and set -q _flag_no_commit; and usage_error "--push needs a commit; drop --no-commit"
+if set -q _flag_check
+    for f in dry_run commit push yes interactive message
+        set -q _flag_$f; and usage_error "--check is read-only and can't be combined with --"(string replace _ - $f)
+    end
+end
+if set -q _flag_dry_run; and set -q _flag_interactive
+    usage_error "--dry-run asks nothing; drop --interactive"
+end
+
+set -g MODE run
+set -q _flag_check; and set MODE check
+set -q _flag_dry_run; and set MODE dry-run
+
+set -g INTERACTIVE 0
+if set -q _flag_interactive
+    set INTERACTIVE 1
+else if test -t 0; and not set -q _flag_yes
+    set INTERACTIVE 1
+end
+test $MODE = run; or set INTERACTIVE 0
+
+if test $MODE = run; and test $INTERACTIVE = 0
+    set -q _flag_yes; or usage_error "stdin is not a terminal: pass --yes to sync without questions (plus --commit/--push), or --interactive to answer from stdin"
+    set -q _flag_push; and not set -q _flag_commit; and usage_error "--push requires --commit when not interactive"
+end
+
+# ── Settings: CLI > environment > settings file > defaults ─────────────────
+
+set -l xdg_config (set -q XDG_CONFIG_HOME; and echo $XDG_CONFIG_HOME; or echo "$HOME/.config")
+set -l xdg_cache (set -q XDG_CACHE_HOME; and echo $XDG_CACHE_HOME; or echo "$HOME/.cache")
+
+set -g conf_exclude
+set -l conf_file "$xdg_config/sumi-files/dotbackup.conf"
+if set -q _flag_config
+    set conf_file (expand_path $_flag_config)
+    test -f "$conf_file"; or die $E_NOINPUT "settings file not found: $conf_file"
+end
+if test -f "$conf_file"
+    test -r "$conf_file"; or die $E_NOPERM "can't read $conf_file"
+    load_config "$conf_file"
+end
+
+function pick
+    # first non-empty argument
+    for v in $argv
+        if test -n "$v"
+            printf '%s\n' "$v"
+            return 0
+        end
+    end
+    return 1
+end
+
+# Repository
+set -g REPO (pick "$_flag_repo" "$SUMI_FILES_DIR" "$conf_repo")
+if test -z "$REPO"
+    set -l self (path resolve -- (status filename))
+    set -l top (command git -C (path dirname -- "$self") rev-parse --show-toplevel 2>/dev/null)
+    if test -n "$top"; and test -f "$top/sumi-files.list"
+        set REPO "$top"
+    end
+end
+test -n "$REPO"; or usage_error "no repository: pass --repo, set SUMI_FILES_DIR, or set 'repo =' in $conf_file"
+set REPO (expand_path "$REPO")
+
+set -g SOURCE (expand_path (pick "$_flag_source" "$conf_source" "$xdg_config"))
+set -g PAYLOAD_REL (string trim -c / -- (pick "$_flag_payload" "$conf_payload" config))
+set -g BRANCH (pick "$_flag_branch" "$conf_branch" main)
+set -q _flag_branch; and test -z "$_flag_branch"; and set BRANCH ""
+set -g REMOTE (pick "$_flag_remote" "$conf_remote" origin)
+set -g EXPECT_REMOTE (pick "$_flag_expect_remote" "$conf_expect_remote")
+set -g SNAPSHOT_DIR (expand_path (pick "$_flag_snapshot_dir" "$conf_snapshot_dir" "$xdg_cache/dotbackup/snapshots"))
+set -g KEEP (pick "$_flag_keep" "$conf_keep" 5)
+string match -qr '^[0-9]+$' -- "$KEEP"; or die $E_CONFIG "keep must be a non-negative integer (got '$KEEP')"
+set -g NO_DELETE 0
+set -q _flag_no_delete; and set NO_DELETE 1
+set -g SKIP_HOOKS 0
+set -q _flag_skip_hooks; and set SKIP_HOOKS 1
+set -g NORMALIZE_HOME 1
+test "$conf_normalize_home" = false; and set NORMALIZE_HOME 0
+set -q _flag_no_normalize_home; and set NORMALIZE_HOME 0
+set -g EXCLUDES
+if not set -q _flag_no_default_excludes; and test "$conf_default_excludes" != false
+    set EXCLUDES __pycache__/ '*.pyc' '*.swp' '*~'
+end
+set -a EXCLUDES $conf_exclude $_flag_exclude
+
+# ── Validation ─────────────────────────────────────────────────────────────
+
+need git rsync cmp find sort sed grep xargs mktemp
+test -d "$REPO"; or die $E_NOINPUT "repository not found: $REPO"
+set REPO (abspath "$REPO")
+set -l top (command git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)
+test -n "$top"; or die $E_DATA "not a git repository: $REPO"
+test (abspath "$top") = "$REPO"; or die $E_DATA "$REPO is inside the repository $top; pass its top level"
+
+test -d "$SOURCE"; or die $E_NOINPUT "source not found: $SOURCE"
+test -r "$SOURCE" -a -x "$SOURCE"; or die $E_NOPERM "can't read $SOURCE"
+set SOURCE (abspath "$SOURCE")
+if is_within "$SOURCE" "$REPO"; or is_within "$REPO" "$SOURCE"
+    die $E_DATA "source ($SOURCE) and repository ($REPO) must not contain each other"
+end
+
+safe_rel "$PAYLOAD_REL"; or die $E_DATA "invalid payload folder '$PAYLOAD_REL'"
+set -g PAYLOAD "$REPO/$PAYLOAD_REL"
+if test -e "$PAYLOAD"
+    is_within "$PAYLOAD" "$REPO"; or die $E_DATA "payload $PAYLOAD resolves outside the repository"
+end
+
+set -g MANIFEST (expand_path (pick "$_flag_manifest" "$conf_manifest" "$REPO/sumi-files.list"))
+test -f "$MANIFEST"; or die $E_NOINPUT "manifest not found: $MANIFEST"
+test -r "$MANIFEST"; or die $E_NOPERM "can't read $MANIFEST"
+load_manifest "$MANIFEST"
+
+# Each entry must stay on its side: a source that resolves into the repository
+# (a stow-style symlinked folder) would be mirrored onto itself, and a payload
+# path that resolves outside the payload (a symlinked folder in the repo) would
+# let rsync --delete write somewhere else entirely.
+set -g LINKED
+set -l payload_real (path resolve -- "$PAYLOAD")
+for i in (seq (count $M_DST))
+    set -l dst_real (path resolve -- "$PAYLOAD/$M_DST[$i]")
+    is_within "$dst_real" "$payload_real"
+    or die $E_DATA "$PAYLOAD_REL/$M_DST[$i] resolves outside the payload ($dst_real); remove that symlink from the repository"
+    set -l src_real (path resolve -- $M_SRC[$i])
+    is_within "$src_real" "$REPO"; or continue
+    if test $M_KIND[$i] = f; and test "$src_real" = "$dst_real"
+        set -ga LINKED $M_DST[$i] # installed with --link: nothing to copy
+    else if test $M_KIND[$i] = d
+        die $E_DATA "$M_SRC[$i] resolves into the repository ($src_real); a symlinked folder can't be mirrored onto itself"
+    end
+end
+
+if test "$NORMALIZE_HOME" = 1
+    string match -qr '^/.+' -- "$HOME"; and test "$HOME" != /
+    or die $E_DATA "HOME ('$HOME') must be an absolute path other than / to normalise it (or pass --no-normalize-home)"
+end
+
+# Repository-owned excludes: things that live next to managed files in the
+# source but must never enter this repository (private files, legacy files).
+if test -f "$REPO/.dotbackup-exclude"
+    set -a EXCLUDES (string replace -r '(^|\s)#.*$' '' < "$REPO/.dotbackup-exclude" | string trim | string match -rv '^$')
+end
+
+set -g HOOKS_DIR (expand_path (pick "$_flag_hooks_dir" "$conf_hooks_dir" "$REPO/hooks/dotbackup"))
+
+if test $MODE = run
+    if test -n "$BRANCH"
+        set -l current (command git -C "$REPO" branch --show-current)
+        test "$current" = "$BRANCH"; or die $E_FAIL "on branch '$current', expected '$BRANCH' (switch, or pass --branch)"
+    end
+    if test -n "$EXPECT_REMOTE"
+        set -l url (command git -C "$REPO" remote get-url "$REMOTE" 2>/dev/null)
+        string match -q -- "$EXPECT_REMOTE" "$url"
+        or die $E_FAIL "remote '$REMOTE' is '$url', which doesn't match '$EXPECT_REMOTE'"
+    end
+    set -l gitdir (command git -C "$REPO" rev-parse --absolute-git-dir)
+    test -f "$gitdir/MERGE_HEAD"; and die $E_FAIL "a merge is in progress in $REPO; finish it first"
+    if test -d "$gitdir/rebase-merge"; or test -d "$gitdir/rebase-apply"
+        die $E_FAIL "a rebase is in progress in $REPO; finish it first"
+    end
+    if test -e "$PAYLOAD"; and not test -w "$PAYLOAD"
+        die $E_NOPERM "can't write to $PAYLOAD"
+    end
+    test -w "$REPO"; or die $E_NOPERM "can't write to $REPO"
+    if not set -q _flag_no_snapshot
+        need tar
+        if is_within "$SNAPSHOT_DIR" "$REPO"; or is_within "$SNAPSHOT_DIR" "$SOURCE"
+            die $E_DATA "the snapshot folder must be outside the repository and the source"
+        end
+    end
+end
+
+# ── Stage and compare ──────────────────────────────────────────────────────
+
+set -g STAGE (command mktemp -d -t dotbackup.XXXXXXXX)
+or die $E_CANTCREAT "can't create a temporary folder"
+function __cleanup --on-event fish_exit
+    test -n "$STAGE"; and test -d "$STAGE"; and command rm -rf -- "$STAGE"
+end
+function __interrupted --on-signal INT --on-signal TERM
+    echo >&2
+    err interrupted
+    exit $E_CANCEL
+end
+
+if test $MODE != check
+    heading (_c cyan)"dotbackup $VERSION"(_c normal)(_c --bold)" — $SOURCE → $REPO"
+end
+stage
+compare
+
+# Holds: files the repo has ahead of the source (a delivery not yet deployed).
+# Overwriting them would lose work, so the run stops before writing anything.
+set -l holds_file "$REPO/.dotbackup-holds"
+if test $MODE = run; and test -f "$holds_file"
+    set -l held 0
+    for rel in (string replace -r '(^|\s)#.*$' '' < "$holds_file" | string trim | string match -rv '^$')
+        if not safe_rel "$rel"
+            err "invalid path in $holds_file: $rel"
+            set held 1
+            continue
+        end
+        if not command cmp -s -- "$STAGE/$rel" "$PAYLOAD/$rel"
+            err "held: $rel differs between the source and the repository"
+            set held 1
+        end
+    end
+    test $held = 0; or die $E_FAIL "nothing was written; deploy the held files or edit $holds_file"
+end
+
+for d in $MISSING_DIRS
+    note "$d/ doesn't exist in the source: skipped"
+end
+
+if test $MODE = check
+    if test (count $CHANGES) -gt 0
+        test "$__quiet" = 1; or print_changes
+        exit $E_PENDING
+    end
+    exit $E_OK
+end
+
+if test (count $CHANGES) -gt 0
+    heading "Changes from the source ("(count $CHANGES)"):"
+    print_changes
+else
+    ok "the repository already matches the source"
+end
+
+if test $MODE = dry-run
+    say ""
+    note "dry run: nothing was written"
+    if test (count $CHANGES) -gt 0
+        set -q _flag_no_snapshot; or note "would save a snapshot to $SNAPSHOT_DIR"
+        test "$SKIP_HOOKS" = 1; or test ! -d "$HOOKS_DIR"; or note "would run the hooks in $HOOKS_DIR"
+    end
+    exit $E_OK
+end
+
+# ── Write ──────────────────────────────────────────────────────────────────
+
+if test (count $CHANGES) -gt 0
+    if test $INTERACTIVE = 1
+        say ""
+        ask "Copy these changes into the repository?" n
+        or begin
+            say ""
+            note "cancelled: nothing was written"
+            exit $E_OK
+        end
+    end
+    set -q _flag_no_snapshot; or snapshot
+    apply
+    ok "synced into $PAYLOAD"
+end
+run_hooks
+
+set -l status_lines (command git -C "$REPO" status --porcelain=v1 -uall)
+if test (count $status_lines) -eq 0
+    ok "nothing to commit"
+    exit $E_OK
+end
+
+heading "Uncommitted changes in the repository:"
+if test "$__quiet" != 1
+    for l in $status_lines
+        echo "    $l"
+    end
+end
+
+if set -q _flag_no_commit
+    say ""
+    note "--no-commit: files are synced; review them with git -C '$REPO' status"
+    exit $E_OK
+end
+
+set -l do_commit 0
+set -q _flag_commit; and set do_commit 1
+if test $INTERACTIVE = 1
+    say ""
+    if ask "Show the full diff?" n
+        command git -C "$REPO" --no-pager diff (test $__color = 1; and echo --color=always) HEAD
+    end
+    if ask "Edit README.md before committing?" n
+        set -l editor (pick "$VISUAL" "$EDITOR")
+        if test -z "$editor"
+            for e in nvim vim nano vi
+                if command -q $e
+                    set editor $e
+                    break
+                end
+            end
+        end
+        if test -n "$editor"
+            $editor "$REPO/README.md"
+        else
+            warn "no editor found (set VISUAL or EDITOR)"
+        end
+    end
+    if test $do_commit = 0
+        ask "Create a local commit?" n; and set do_commit 1
+    end
+end
+if test $do_commit = 0
+    say ""
+    note "not committed: files are synced; review them with git -C '$REPO' status"
+    exit $E_OK
+end
+
+set -l message "dotfiles: backup "(date '+%Y-%m-%d %H:%M')
+if set -q _flag_message
+    set message "$_flag_message"
+else if test $INTERACTIVE = 1
+    set message (ask_text "Commit message:" "$message")
+end
+test -n "$message"; or die $E_USAGE "empty commit message"
+
+command git -C "$REPO" add -A; or die $E_FAIL "git add failed"
+heading "Scanning for secrets…"
+if not secret_scan
+    command git -C "$REPO" reset -q
+    die $E_FAIL "possible secrets found above: commit aborted (files stay synced, nothing is staged)"
+end
+ok "no secrets found"
+informational_checks
+
+command git -C "$REPO" commit -q -m "$message"; or die $E_FAIL "git commit failed"
+ok "committed: "(command git -C "$REPO" log --oneline -1)
+
+set -l do_push 0
+set -q _flag_push; and set do_push 1
+if test $do_push = 0; and test $INTERACTIVE = 1
+    say ""
+    ask "Push to $REMOTE/"(command git -C "$REPO" branch --show-current)" now?" n; and set do_push 1
+end
+if test $do_push = 0
+    note "not pushed: git -C '$REPO' push $REMOTE"
+    exit $E_OK
+end
+
+set -l branch_now (command git -C "$REPO" branch --show-current)
+command git -C "$REPO" push "$REMOTE" "$branch_now"
+or die $E_FAIL "push failed; the commit is safe locally: git -C '$REPO' push $REMOTE $branch_now"
+ok "pushed to $REMOTE/$branch_now"
+if test "$__quiet" != 1
+    say ""
+    command git -C "$REPO" --no-pager show --stat --format='  %h %s' HEAD | command sed 's/^/  /'
+end
+exit $E_OK

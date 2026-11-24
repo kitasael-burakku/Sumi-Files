@@ -1,0 +1,166 @@
+"$schema" = 'https://starship.rs/config-schema.json'
+
+# ── Plantilla dinámica (matugen) ─────────────────────────────────
+# Generada a ~/.config/starship.toml. NO editar el archivo generado.
+# Referencia estática: ~/.config/starship.static.toml — mismo contenido
+# con la paleta fija; los comentarios largos viven allá.
+# Sin post_hook: starship relee su config en cada render del prompt.
+
+# ── Estructura ──────────────────────────────────────────────────
+# Su gemelo estático es ~/.config/starship.static.toml, con la paleta fija
+# "Minimaru". hypr/scripts/apply-static-colors.sh copia ese archivo
+# encima de ~/.config/starship.toml al apagar matugen (SUPER+SHIFT+W), así
+# que todo cambio de estructura tiene que hacerse en los DOS o se pierde al
+# primer toggle. hypr/scripts/check-template-parity.sh compara el conjunto
+# de claves de ambos.
+
+# ── Forma del prompt ────────────────────────────────────────────
+#   ┌ 󰣇 user@host  󱂵 ホーム/󰒓 設定/hypr  󰊢 main 󰏫
+#   └ $
+
+
+format = """
+[┌](fg:{{colors.outline.default.hex}}) \
+$os\
+${env_var.USER_PRETTY}\
+[@](fg:{{colors.outline.default.hex}})\
+${env_var.HOSTNAME_PRETTY}\
+$directory\
+$git_branch\
+$git_status\
+$python\
+$nodejs\
+$rust\
+$golang\
+$cmd_duration\
+$status\
+$line_break\
+[└](fg:{{colors.outline.default.hex}}) \
+$character\
+"""
+
+command_timeout = 500
+add_newline = false
+
+# ── OS ──────────────────────────────────────────────────────────
+[os]
+disabled = false
+style = "fg:{{colors.secondary.default.hex}}"
+format = "[$symbol ]($style)"
+
+[os.symbols]
+Arch        = "󰣇"
+CachyOS     = "󰣇"
+Manjaro     = "󱆅"
+Fedora      = "󰣛"
+Ubuntu      = "󰕈"
+Debian      = "󰣚"
+NixOS       = "󱄅"
+EndeavourOS = ""
+Garuda      = "󰛓"
+openSUSE    = ""
+Gentoo      = "󰣨"
+Alpine      = ""
+Unknown     = "󰌽"
+
+# ── Usuario ─────────────────────────────────────────────────────
+[env_var.USER_PRETTY]
+style = "fg:{{colors.primary.default.hex}} bold"
+format = "[$env_value]($style)"
+
+# ── Hostname ────────────────────────────────────────────────────
+[env_var.HOSTNAME_PRETTY]
+style = "fg:{{colors.outline.default.hex}}"
+format = "[$env_value]($style)"
+
+# ── Directorio ──────────────────────────────────────────────────
+[directory]
+style = "fg:{{colors.tertiary.default.hex}} bold"
+format = "  [$path]($style)[$read_only]($read_only_style)"
+read_only_style = "fg:{{colors.error.default.hex}}"
+truncate_to_repo = false
+home_symbol = "~ ホーム"
+read_only = " 󰌾 読取専用"
+truncation_length = 4
+truncation_symbol = "…/"
+
+[directory.substitutions]
+"Desktop"   = "󰇄 デスクトップ"
+"Documents" = "󰈙 ドキュメント"
+"Downloads" = "󰇚 ダウンロード"
+"Music"     = "󰎈 音楽"
+"Pictures"  = "󰏏 写真"
+"Videos"    = "󰕧 ビデオ"
+"Projects"  = "󱌢 プロジェクト"
+"GitHub"    = "󰊤 ギットハブ"
+"Code"      = "󰨞 コード"
+".config"   = "󰒓 設定"
+
+# ── Git branch ──────────────────────────────────────────────────
+[git_branch]
+symbol = "󰊢"
+style = "fg:{{colors.on_surface_variant.default.hex}} bold"
+truncation_length = 18
+format = "  [$symbol $branch]($style)"
+
+# ── Git status ──────────────────────────────────────────────────
+[git_status]
+style = "fg:{{colors.error.default.hex}} bold"
+format = "([ $all_status$ahead_behind]($style))"
+conflicted = "󰞇 "
+ahead      = "⇡${count}"
+behind     = "⇣${count}"
+diverged   = "⇕"
+untracked  = "󰋗 "
+stashed    = "󰆼"
+modified   = "󰏫 "
+staged     = "󰐗 "
+renamed    = "󰕚 "
+deleted    = "󰍶 "
+
+# on_*_container sale blanco en claro → en claro el rol base (ver kitty-colors.conf)
+# ── Lenguajes ───────────────────────────────────────────────────
+[python]
+symbol = ""
+style = "fg:<* if {{ is_dark_mode }} *>{{colors.on_tertiary_container.default.hex}}<* else *>{{colors.tertiary.default.hex}}<* endif *> bold"
+format = "  [$symbol $version]($style)"
+
+[nodejs]
+symbol = ""
+style = "fg:<* if {{ is_dark_mode }} *>{{colors.on_secondary_container.default.hex}}<* else *>{{colors.secondary.default.hex}}<* endif *> bold"
+format = "  [$symbol $version]($style)"
+
+[rust]
+symbol = "󱘗"
+style = "fg:{{colors.secondary.default.hex}} bold"
+format = "  [$symbol $version]($style)"
+
+[golang]
+symbol = ""
+style = "fg:<* if {{ is_dark_mode }} *>{{colors.on_primary_container.default.hex}}<* else *>{{colors.primary.default.hex}}<* endif *> bold"
+format = "  [$symbol $version]($style)"
+
+# ── Extras ───────────────────────────────────────────────────────
+[cmd_duration]
+min_time = 2000
+show_milliseconds = false
+style = "fg:{{colors.outline.default.hex}} italic"
+format = "  [󰔚 $duration]($style)"
+
+[status]
+disabled = false
+style = "fg:{{colors.error.default.hex}} bold"
+format = "  [󰅚 $status]($style)"
+
+[character]
+success_symbol = '[\$](fg:{{colors.on_surface.default.hex}} bold)'
+error_symbol   = '[\$](fg:{{colors.error.default.hex}} bold)'
+
+[package]
+disabled = true
+[memory_usage]
+disabled = true
+[time]
+disabled = true
+[line_break]
+disabled = false

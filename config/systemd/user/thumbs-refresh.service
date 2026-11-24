@@ -1,0 +1,13 @@
+[Unit]
+Description=Genera/poda thumbnails del wallpaper picker en background
+# Sin límite de arranques: la superficie de wallpapers de Sumi Shell lanza
+# esta unidad CADA vez que se abre (services/Wallpaper.qml, refreshThumbs), y
+# abrir/cerrar el picker rápido superaba el límite por defecto de systemd (5
+# arranques en 10 s) → "start-limit-hit" y "Failed to start" en el journal
+# (2026-09-24, 07:06). Quitarlo es seguro: generate-thumbs.sh es incremental,
+# tarda ~0.1 s y se serializa solo con `flock -n`.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/hypr/scripts/generate-thumbs.sh

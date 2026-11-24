@@ -1,0 +1,228 @@
+{
+  "schemaVersion": 4,
+  "shell": {
+    "interface": {
+      "scale": 0.8,
+      "density": "default",
+      "autoHide": false,
+      "reserveSpace": true,
+      "workspaceIndicators": 5,
+      "hoverPreview": true,
+      "osdPlacement": "sides"
+    },
+    "animations": {
+      "mode": "normal",
+      "speed": 1.25,
+      "windowStyle": "bloom",
+      "barPanels": "unfold",
+      "islandStyle": "fluid"
+    },
+    "surfaces": {
+      "unloadSeconds": 30,
+      "minimizerThumbnails": true
+    },
+    "island": {
+      "visualizerFps": 30,
+      "musicCircle": true,
+      "networkCircle": true,
+      "wheel": "volume",
+      "middleClick": "playpause"
+    },
+    "session": {
+      "keepAwake": true
+    },
+    "integrations": {
+      "polkitAgent": true,
+      "notificationServer": true
+    },
+    "lock": {
+      "avatar": "",
+      "fetchImage": "",
+      "entry": "auto",
+      "pamService": "auto"
+    },
+    "monitors": {},
+    "integration": {
+      "preferredDisplay": ""
+    },
+    "weather": {
+      "enabled": false,
+      "location": {},
+      "units": "celsius"
+    },
+    "calendar": {
+      "firstDay": "locale",
+      "clock": "24h"
+    },
+    "notifications": {
+      "popupSeconds": 3,
+      "position": "bottom-left",
+      "margin": 20
+    },
+    "osd": {
+      "durationMs": 1800,
+      "showValue": true
+    },
+    "launcher": {
+      "scrollbar": "right"
+    },
+    "dashboard": {
+      "taskEveryDays": {
+        "dotbackup": 7,
+        "diskbackup": 7
+      }
+    },
+    "player": {
+      "backdrop": "cover",
+      "cover": "disc",
+      "spin": "off",
+      "endTime": "total"
+    },
+    "battery": {
+      "alerts": true,
+      "low": 20,
+      "veryLow": 10,
+      "critical": 5
+    },
+    "emoji": {
+      "action": "copy"
+    },
+    "notch": {
+      "rest": "clock",
+      "color": "theme",
+      "corners": "soft",
+      "flare": "long",
+      "activity": {
+        "music": true,
+        "recording": true,
+        "speed": true,
+        "power": true,
+        "copy": true,
+        "bluetooth": true,
+        "workspace": true
+      },
+      "visualizerFps": 60
+    }
+  },
+  "theme": {
+    "wallpaper": {
+      "videoPreview": false,
+      "sources": [
+        "~/Pictures/Wallpapers",
+        "~/Videos/Wallpapers"
+      ],
+      "downloadDir": "~/Pictures/Wallpapers",
+      "rotation": {
+        "enabled": false,
+        "minutes": 15,
+        "from": "all",
+        "pauseFullscreen": true,
+        "pauseBattery": false,
+        "pauseModes": true
+      },
+      "transition": "wipe",
+      "wallhaven": {
+        "username": ""
+      }
+    },
+    "typography": {
+      "textSize": 1,
+      "preset": "maple-mono",
+      "uiFamily": "",
+      "monoFamily": "",
+      "sync": {
+        "gtkInterface": true,
+        "gtkMonospace": true,
+        "gtk4Interface": true,
+        "qt6Interface": true,
+        "qt6Fixed": true,
+        "kitty": true,
+        "kittyReload": true,
+        "vscodium": true,
+        "qt5Interface": true,
+        "qt5Fixed": true
+      }
+    },
+    "appearance": {
+      "glassOpacity": 0.75,
+      "material": "satin",
+      "materialEdge": "defined",
+      "materialShadow": true,
+      "surfaces": {},
+      "backgroundBlur": false
+    },
+    "desktopSync": "full",
+    "icons": {
+      "theme": "Slot-Dark-Icons",
+      "followMode": true,
+      "sumi": {
+        "enabled": true,
+        "variant": "auto"
+      }
+    },
+    "cursor": {
+      "theme": "Bibata-Modern-Classic",
+      "size": 16
+    },
+    "style": {
+      "name": "terminal",
+      "terminal": {
+        "frame": "single",
+        "decor": "minimal",
+        "monoText": true
+      }
+    },
+    "effects": {
+      "glitch": "strong",
+      "scanlines": false,
+      "glow": false,
+      "powerOn": true
+    }
+  },
+  "apps": {
+    "terminal": "kitty",
+    "terminalExec": "auto",
+    "browser": "zen-browser",
+    "launchScope": "auto"
+  },
+  "providers": {
+    "wallpaper": "script",
+    "theme": "auto",
+    "thumbnails": "auto",
+    "updates": "script"
+  },
+  "recorder": {
+    "preset": "custom",
+    "custom": {
+      "encoder": "auto",
+      "fps": 200,
+      "quality": "high",
+      "bitrate": 40,
+      "height": 1080
+    },
+    "format": "mp4",
+    "audio": {
+      "system": true,
+      "mic": true,
+      "systemSource": "",
+      "micSource": "bluez_input.38:C4:3A:1F:29:80",
+      "codec": "aac",
+      "bitrate": 160,
+      "sampleRate": 48000
+    },
+    "files": {
+      "dir": "",
+      "name": "Recording {date} {time}"
+    },
+    "delay": 3,
+    "hud": {
+      "indicator": true,
+      "timer": true,
+      "island": true,
+      "bar": true
+    },
+    "notify": true,
+    "openFolder": false,
+    "rememberMode": true
+  }
+}

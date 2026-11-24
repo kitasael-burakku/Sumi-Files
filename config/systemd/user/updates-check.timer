@@ -1,0 +1,36 @@
+[Unit]
+Description=Timer periódico para updates-check.service
+
+[Timer]
+# Antes esto se disparaba implícitamente cada vez que waybar sondeaba
+# custom/updates (interval: 30s en config.jsonc) y el cache TTL de
+# updates.sh (300s) ya vencía — es decir, la primera consulta de waybar
+# después de esos 5 min bloqueaba ese ciclo de render con la llamada real a
+# checkupdates/yay -Qua. Ahora el refresh real corre acá, desacoplado del
+# polling de quien lo muestre: Sumi Shell lee el mismo cache (y Waybar lo
+# leia antes de retirarse), pero nunca es quien dispara la consulta lenta.
+#
+# OnBootSec=/OnUnitActiveSec= (reloj monotónico) se probó primero acá, pero
+# se rompía en cada reinicio real: "próxima vez" se calculaba contra
+# LastTriggerUSec de la sesión anterior, con un reloj monotónico que
+# arranca de cero en cada boot — confirmado en vivo, el timer quedaba con
+# next_elapse=infinity después de reiniciar (nunca volvía a correr solo).
+# Los otros 3 timers de este rice (thumbs-refresh/healthcheck-notify/
+# dotbackup-remind) usan OnCalendar= — reloj de pared, sin esta clase de
+# bug — y nunca tuvieron el problema. Mismo mecanismo acá ahora.
+OnCalendar=*:0/30
+Persistent=true
+# Persistent=true dispara la corrida perdida durante el apagado apenas arranca
+# el gestor de usuario. Como OnCalendar pasa dos veces por hora, casi cualquier
+# login cae después de un disparo perdido — y este servicio consulta la red
+# (checkupdates + yay -Qua): medido, era el servicio de usuario más caro del
+# arranque por un factor de 3 (2,689 s de pared, 781 ms de CPU, 138 MB de pico,
+# encima de los primeros 3 s de sesión). El retardo lo dispersa fuera del login
+# sin cambiar la cadencia normal de 30 min.
+# Mismo patrón que ya usan thumbs-refresh, healthcheck-notify y
+# dotbackup-remind. NO se cambia OnCalendar: el comentario de arriba documenta
+# por qué OnUnitActiveSec se rompía al reiniciar.
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

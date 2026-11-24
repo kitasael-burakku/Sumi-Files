@@ -1,0 +1,494 @@
+import sys, struct, threading, time, subprocess, json, os, shutil
+import fcntl
+import select
+import math
+import socket
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from hypr_ipc import move_window_exact_lua, batch_async
+
+#desired path /home/user/scripts/
+
+# Input no longer comes from /dev/input directly: the system service
+# infinite-input.service (system/input_reader.py) reads the devices and only
+# forwards Super/Alt/Ctrl, left click and relative mouse motion over this
+# socket, so the session user doesn't need to be in the "input" group.
+# Usage: infinite_desktop_core.py [speed]
+speed = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
+
+INPUT_SOCKET = "/run/infinite-input.sock"
+INPUT_RECONNECT_DELAY = 1.0  # seconds between reconnection attempts
+
+EVENT_SIZE = struct.calcsize('llHHi')
+EV_KEY=1; EV_REL=2; REL_X=0; REL_Y=1
+KEY_LEFTMETA=125; KEY_RIGHTMETA=126
+KEY_LEFTALT=56; KEY_RIGHTALT=100
+KEY_LEFTCTRL=29; KEY_RIGHTCTRL=97
+KEY_LEFT=105; KEY_RIGHT=106
+KEY_UP=103; KEY_DOWN=108
+BTN_LEFT=272
+
+STATE_FILE = "/tmp/infinite-desktop-state"
+PROTECTED_APPS = ['brave-browser', 'chromium', 'chromium-browser', 'google-chrome', 
+                  'firefox', 'firefoxdeveloperedition', 'librewolf', 'vivaldi', 
+                  'opera', 'microsoft-edge']
+
+lock = threading.Lock()
+super_pressed=False; alt_pressed=False; ctrl_pressed=False; btn_left=False
+acc_x=0.0; acc_y=0.0
+frame_held_hidden=False  # last state notified to quickshell (avoids spamming ipc calls)
+
+# Variables for window dragging
+window_drag_active = False
+last_window_pos = None
+last_window_bounds = None
+mouse_rel_x = 0
+mouse_rel_y = 0
+
+# Keyboard movement step
+KEY_MOVE_STEP = 20
+
+def read_inverted():
+    try:
+        with open(STATE_FILE) as f:
+            return f.read().strip() == 'inverse'
+    except:
+        return False
+
+# quickshell ('qs') is optional — this daemon doesn't depend on it for
+# anything besides showing/hiding a visual frame. Resolved once on import
+# instead of on every toggle: without this, every SUPER+ALT spawned a
+# thread + subprocess.run doomed to FileNotFoundError if 'qs' isn't
+# installed (silent thanks to the try/except, but still overhead per event).
+QUICKSHELL_AVAILABLE = shutil.which("qs") is not None
+
+def notify_quickshell_hold(state):
+    """Tells quickshell (IpcHandler target='frame') to hide/show the frame.
+    Non-blocking: launched in its own thread so it doesn't add latency to
+    the keyboard-reading loop. No-op if quickshell isn't installed
+    (QUICKSHELL_AVAILABLE=False) or isn't running (e.g. during a reload)."""
+    if not QUICKSHELL_AVAILABLE:
+        return
+    try:
+        subprocess.run(
+            ['qs', 'ipc', 'call', 'frame', 'setHeldHidden', 'true' if state else 'false'],
+            capture_output=True, timeout=1.0
+        )
+    except Exception:
+        pass
+
+def get_monitor_bounds():
+    try:
+        r = subprocess.run(['hyprctl', 'monitors', '-j'], capture_output=True, text=True, timeout=0.1)
+        monitors = json.loads(r.stdout)
+        if monitors:
+            for m in monitors:
+                if m.get('focused', False):
+                    return {
+                        'left': m['x'],
+                        'right': m['x'] + m['width'],
+                        'top': m['y'],
+                        'bottom': m['y'] + m['height'],
+                        'width': m['width'],
+                        'height': m['height']
+                    }
+            m = monitors[0]
+            return {
+                'left': m['x'],
+                'right': m['x'] + m['width'],
+                'top': m['y'],
+                'bottom': m['y'] + m['height'],
+                'width': m['width'],
+                'height': m['height']
+            }
+    except:
+        pass
+    return {'left': 0, 'right': 1920, 'top': 0, 'bottom': 1080, 'width': 1920, 'height': 1080}
+
+def get_floating_windows(workspace_id):
+    try:
+        r = subprocess.run(['hyprctl', 'clients', '-j'], capture_output=True, text=True, timeout=0.1)
+        clients = json.loads(r.stdout)
+        floating = []
+        for w in clients:
+            if w.get('floating') and w.get('workspace', {}).get('id') == workspace_id:
+                floating.append(w)
+        return floating
+    except:
+        return []
+
+def get_focused_window():
+    try:
+        r = subprocess.run(['hyprctl', 'activewindow', '-j'], capture_output=True, text=True, timeout=0.1)
+        return json.loads(r.stdout)
+    except:
+        return None
+
+def is_protected_app(window):
+    if not window:
+        return False
+    window_class = window.get('class', '').lower()
+    return any(app in window_class for app in PROTECTED_APPS)
+
+def get_window_center(window):
+    return (window['at'][0] + window['size'][0] // 2,
+            window['at'][1] + window['size'][1] // 2)
+
+def get_window_bounds(window):
+    x, y = window['at'][0], window['at'][1]
+    w, h = window['size'][0], window['size'][1]
+    return {
+        'left': x,
+        'right': x + w,
+        'top': y,
+        'bottom': y + h,
+        'center_x': x + w // 2,
+        'center_y': y + h // 2
+    }
+
+def windows_overlap_horizontally(bounds1, bounds2):
+    return not (bounds1['right'] <= bounds2['left'] or bounds1['left'] >= bounds2['right'])
+
+def windows_overlap_vertically(bounds1, bounds2):
+    return not (bounds1['bottom'] <= bounds2['top'] or bounds1['top'] >= bounds2['bottom'])
+
+
+
+def pan_other_windows(excluded_addr, dx, dy, workspace_id):
+    """Moves every window EXCEPT the specified one in a single batch"""
+    if dx == 0 and dy == 0:
+        return
+    try:
+        floating_windows = get_floating_windows(workspace_id)
+        exprs = []
+        for w in floating_windows:
+            if w['address'] != excluded_addr:
+                nx = int(w['at'][0] + dx)
+                ny = int(w['at'][1] + dy)
+                exprs.append(move_window_exact_lua(nx, ny, w['address']))
+        batch_async(exprs)
+    except:
+        pass
+
+def get_monitor_center():
+    """Returns the center of the focused monitor."""
+    try:
+        r = subprocess.run(['hyprctl', 'monitors', '-j'], capture_output=True, text=True, timeout=0.1)
+        monitors = json.loads(r.stdout)
+        for m in monitors:
+            if m.get('focused', False):
+                return m['x'] + m['width'] // 2, m['y'] + m['height'] // 2
+    except:
+        pass
+    return 960, 540
+
+
+def monitor_window_drag():
+    """Monitors whether a window is being dragged and applies edge push"""
+    global window_drag_active, last_window_bounds, mouse_rel_x, mouse_rel_y
+    
+    dragged_window_addr = None
+    
+    while True:
+        try:
+            with lock:
+                is_dragging = super_pressed and btn_left and not alt_pressed and not ctrl_pressed
+                mouse_dx = mouse_rel_x
+                mouse_dy = mouse_rel_y
+                mouse_rel_x = 0
+                mouse_rel_y = 0
+            
+            if is_dragging and not window_drag_active:
+                focused = get_focused_window()
+                if focused and focused.get('address'):
+                    dragged_window_addr = focused['address']
+                    window_drag_active = True
+                    last_window_bounds = get_window_bounds(focused)
+            
+            elif not is_dragging and window_drag_active:
+                window_drag_active = False
+                dragged_window_addr = None
+                last_window_bounds = None
+            
+            if window_drag_active and dragged_window_addr:
+                window = get_focused_window()
+                if window and window.get('address') == dragged_window_addr:
+                    current_bounds = get_window_bounds(window)
+                    monitor = get_monitor_bounds()
+                    MARGIN = 10
+                    
+                    touch_left   = current_bounds['left']   <= monitor['left']   + MARGIN
+                    touch_right  = current_bounds['right']  >= monitor['right']  - MARGIN
+                    touch_top    = current_bounds['top']    <= monitor['top']    + MARGIN
+                    touch_bottom = current_bounds['bottom'] >= monitor['bottom'] - MARGIN
+                    
+                    if (touch_left or touch_right or touch_top or touch_bottom) and (mouse_dx != 0 or mouse_dy != 0):
+                        pan_dx = 0
+                        pan_dy = 0
+                        
+                        if touch_right and mouse_dx > 0:
+                            pan_dx = -mouse_dx
+                        elif touch_left and mouse_dx < 0:
+                            pan_dx = -mouse_dx
+                        
+                        if touch_bottom and mouse_dy > 0:
+                            pan_dy = -mouse_dy
+                        elif touch_top and mouse_dy < 0:
+                            pan_dy = -mouse_dy
+                        
+                        if pan_dx != 0 or pan_dy != 0:
+                            r = subprocess.run(['hyprctl', 'activeworkspace', '-j'], 
+                                             capture_output=True, text=True, timeout=0.1)
+                            ws = json.loads(r.stdout)
+                            workspace_id = ws['id']
+                            pan_other_windows(dragged_window_addr, int(pan_dx), int(pan_dy), workspace_id)
+                    
+                    last_window_bounds = current_bounds
+                else:
+                    window_drag_active = False
+                    dragged_window_addr = None
+            
+            time.sleep(0.016)
+        except Exception as e:
+            time.sleep(0.1)
+
+
+def move_active_window(direction):
+    """Moves the active window KEY_MOVE_STEP px in the given direction.
+    If it hits the monitor edge, pushes the other windows in the opposite direction."""
+    try:
+        r = subprocess.run(['hyprctl', 'activeworkspace', '-j'], capture_output=True, text=True, timeout=0.1)
+        ws = json.loads(r.stdout)
+        workspace_id = ws['id']
+
+        window = get_focused_window()
+        if not window or not window.get('floating'):
+            return
+
+        monitor = get_monitor_bounds()
+        bounds = get_window_bounds(window)
+        addr = window['address']
+
+        dx, dy = 0, 0
+        if direction == 'left':
+            dx = -KEY_MOVE_STEP
+        elif direction == 'right':
+            dx = KEY_MOVE_STEP
+        elif direction == 'up':
+            dy = -KEY_MOVE_STEP
+        elif direction == 'down':
+            dy = KEY_MOVE_STEP
+
+        new_x = window['at'][0] + dx
+        new_y = window['at'][1] + dy
+
+        # Detect edge hit AFTER the move
+        new_bounds_left   = new_x
+        new_bounds_right  = new_x + window['size'][0]
+        new_bounds_top    = new_y
+        new_bounds_bottom = new_y + window['size'][1]
+
+        hits_left   = new_bounds_left   <= monitor['left']
+        hits_right  = new_bounds_right  >= monitor['right']
+        hits_top    = new_bounds_top    <= monitor['top']
+        hits_bottom = new_bounds_bottom >= monitor['bottom']
+
+        hitting_edge = (dx < 0 and hits_left) or (dx > 0 and hits_right) or                        (dy < 0 and hits_top)  or (dy > 0 and hits_bottom)
+
+        # Move the active window
+        subprocess.run(['hyprctl', 'dispatch', move_window_exact_lua(new_x, new_y, addr)],
+                       capture_output=True, timeout=0.2)
+
+        # If it hits an edge, push the others in the opposite direction
+        if hitting_edge:
+            pan_other_windows(addr, -dx, -dy, workspace_id)
+
+    except Exception as e:
+        print(f"Error in move_active_window: {e}", flush=True)
+
+
+def handle_key(code, value):
+    """Applies ONE keyboard event (only modifiers arrive from the socket).
+    Same logic the old per-keyboard evdev reader thread had."""
+    global super_pressed, alt_pressed, ctrl_pressed, frame_held_hidden
+    if value == 2:
+        return
+
+    notify_state = None
+    with lock:
+        if code in (KEY_LEFTMETA, KEY_RIGHTMETA):
+            super_pressed = (value == 1)
+        elif code in (KEY_LEFTALT, KEY_RIGHTALT):
+            alt_pressed = (value == 1)
+        elif code in (KEY_LEFTCTRL, KEY_RIGHTCTRL):
+            ctrl_pressed = (value == 1)
+
+        combo = super_pressed and alt_pressed
+        if combo != frame_held_hidden:
+            frame_held_hidden = combo
+            notify_state = combo
+
+    # The IPC call (subprocess) is made OUTSIDE the lock and in its
+    # own thread: qs ipc call can take a few ms and we don't want to
+    # block event reading while holding the lock.
+    if notify_state is not None and QUICKSHELL_AVAILABLE:
+        threading.Thread(target=notify_quickshell_hold, args=(notify_state,), daemon=True).start()
+
+
+def handle_mouse(etype, code, value):
+    """Applies ONE mouse event (left button or REL_X/REL_Y).
+    Same logic the old per-mouse evdev reader thread had."""
+    global acc_x, acc_y, btn_left, mouse_rel_x, mouse_rel_y
+    with lock:
+        if etype == EV_KEY and code == BTN_LEFT:
+            btn_left = (value == 1)
+        elif etype == EV_REL:
+            if code == REL_X:
+                mouse_rel_x += value
+            elif code == REL_Y:
+                mouse_rel_y += value
+
+            if super_pressed and alt_pressed:
+                sign = -1 if read_inverted() else 1
+                if code == REL_X:
+                    acc_x += value * speed * sign
+                elif code == REL_Y:
+                    acc_y += value * speed * sign
+            else:
+                acc_x = 0.0
+                acc_y = 0.0
+
+
+def release_all_inputs():
+    """Forgets every pressed key/button. Called when the socket drops, so a
+    Super that was held at that moment can't stay "stuck" forever."""
+    global super_pressed, alt_pressed, ctrl_pressed, btn_left, acc_x, acc_y, frame_held_hidden
+    notify = False
+    with lock:
+        super_pressed = alt_pressed = ctrl_pressed = btn_left = False
+        acc_x = acc_y = 0.0
+        if frame_held_hidden:
+            frame_held_hidden = False
+            notify = True
+    if notify and QUICKSHELL_AVAILABLE:
+        threading.Thread(target=notify_quickshell_hold, args=(False,), daemon=True).start()
+
+
+def input_socket_reader():
+    """Reads the filtered event stream from infinite-input.service.
+    Protocol, one line per event:  K <code> <0|1>  |  B <0|1>  |  R <dx> <dy>
+    Reconnects forever: if the service restarts, the canvas recovers on its own."""
+    waiting_logged = False
+    while True:
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(INPUT_SOCKET)
+        except OSError as e:
+            sock.close()
+            if not waiting_logged:
+                print(f"Waiting for {INPUT_SOCKET} ({e.strerror or e}); "
+                      "is infinite-input.socket installed? (system/install.sh)", flush=True)
+                waiting_logged = True
+            time.sleep(INPUT_RECONNECT_DELAY)
+            continue
+
+        waiting_logged = False
+        print(f"[+] Connected to {INPUT_SOCKET}", flush=True)
+        try:
+            with sock, sock.makefile("r") as stream:
+                for line in stream:
+                    parts = line.split()
+                    try:
+                        if parts[0] == "K" and len(parts) == 3:
+                            handle_key(int(parts[1]), int(parts[2]))
+                        elif parts[0] == "B" and len(parts) == 2:
+                            handle_mouse(EV_KEY, BTN_LEFT, int(parts[1]))
+                        elif parts[0] == "R" and len(parts) == 3:
+                            dx, dy = int(parts[1]), int(parts[2])
+                            if dx:
+                                handle_mouse(EV_REL, REL_X, dx)
+                            if dy:
+                                handle_mouse(EV_REL, REL_Y, dy)
+                    except (ValueError, IndexError):
+                        continue
+        except OSError as e:
+            print(f"Input socket error: {e}", flush=True)
+
+        print("[-] Input socket closed; reconnecting", flush=True)
+        release_all_inputs()
+        time.sleep(INPUT_RECONNECT_DELAY)
+
+
+# PRELOAD
+print("Preloading...", flush=True)
+try:
+    subprocess.run(['hyprctl', 'activeworkspace', '-j'], capture_output=True, text=True, timeout=0.5)
+    subprocess.run(['hyprctl', 'clients', '-j'], capture_output=True, text=True, timeout=0.5)
+except:
+    pass
+
+threading.Thread(target=input_socket_reader, daemon=True).start()
+threading.Thread(target=monitor_window_drag, daemon=True).start()
+print(f"Infinite Desktop active (input via {INPUT_SOCKET})", flush=True)
+print("Super+click: Drag window (touching an edge moves the rest)", flush=True)
+print("Super+Alt+mouse: Drag the entire desktop", flush=True)
+print("Super+arrows: Navigation via hyprland bind", flush=True)
+print("Super+Shift+arrows: Move active window via hyprland bind", flush=True)
+
+# Active workspace cache (refreshed every 2s so hyprctl isn't called every frame)
+_cached_workspace_id = None
+_last_workspace_check = 0
+WORKSPACE_CACHE_TTL = 2.0
+
+def get_cached_workspace_id():
+    global _cached_workspace_id, _last_workspace_check
+    now = time.time()
+    if _cached_workspace_id is None or (now - _last_workspace_check) > WORKSPACE_CACHE_TTL:
+        try:
+            r = subprocess.run(['hyprctl', 'activeworkspace', '-j'],
+                               capture_output=True, text=True, timeout=0.1)
+            ws = json.loads(r.stdout)
+            _cached_workspace_id = ws['id']
+            _last_workspace_check = now
+        except:
+            pass
+    return _cached_workspace_id
+
+# Main loop for desktop dragging
+while True:
+    time.sleep(0.016)
+
+    with lock:
+        active_drag = super_pressed and alt_pressed
+        dx = acc_x
+        dy = acc_y
+        acc_x = 0.0
+        acc_y = 0.0
+
+    if not active_drag:
+        continue
+
+    idx = int(round(dx))
+    idy = int(round(dy))
+
+    if idx == 0 and idy == 0:
+        continue
+
+    try:
+        workspace_id = get_cached_workspace_id()
+        if workspace_id is None:
+            continue
+
+        r = subprocess.run(['hyprctl', 'clients', '-j'], capture_output=True, text=True, timeout=0.1)
+        clients = json.loads(r.stdout)
+
+        exprs = []
+        for w in clients:
+            if w.get('floating') and w.get('workspace', {}).get('id') == workspace_id:
+                nx = w['at'][0] + idx
+                ny = w['at'][1] + idy
+                exprs.append(move_window_exact_lua(nx, ny, w['address']))
+
+        batch_async(exprs)
+    except Exception as e:
+        pass

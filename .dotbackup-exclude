@@ -1,0 +1,38 @@
+# ============================================================================
+#  .dotbackup-exclude — paths dotbackup never copies into this repository,
+#  even though they live inside a directory the manifest mirrors.
+#  rsync patterns. With an inner '/', a path relative to ~/.config;
+#  without one, a name matched anywhere. (docs/DOTBACKUP.md § Excludes)
+#  Excluded files that already exist in the repo are left alone, not deleted.
+# ============================================================================
+
+# Private by design (templates/examples are versioned instead)
+hypr/modules/private.lua
+fish/conf.d/local.fish
+fish/fish_variables
+# fish/completions/ is mirrored, but only ec.fish and minimaru.fish are
+# versioned (.gitignore): other completions stay local, untracked.
+
+# Generated or session state (also in .gitignore; excluding them here keeps
+# them out of the working tree and out of the snapshots)
+fastfetch/.fastfetch_bag
+hypr/.current-wallpaper
+hypr/.current-wallpaper-outputs
+hyprlock/wallpapers/
+matugen/enabled
+matugen/scheme
+matugen/mode
+matugen/contrast
+matugen/source
+kitty/sumi-shell-fonts.conf
+
+# Third-party artwork, or art of unknown origin, that is not redistributed
+# (fastfetch/fastfetchlogo/README.md)
+fastfetch/fastfetchlogo/*.png
+fastfetch/fastfetchlogo/fox.txt
+
+# Dated copies
+*.bak
+*.bak-*
+*.old
+*.orig

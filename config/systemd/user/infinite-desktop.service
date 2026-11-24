@@ -1,0 +1,28 @@
+[Unit]
+Description=Infinite Desktop — canvas infinito por mouse/teclado (hyprland-infinite-desktop-v2)
+# Recibe Super/Alt/Ctrl, clic izquierdo y movimiento del ratón desde
+# /run/infinite-input.sock (infinite-input.service, de sistema; ver
+# hypr/infinite_desktop/system/) y habla con Hyprland vía hypr_ipc.py.
+# Ya NO lee /dev/input ni necesita el grupo "input" (que daría a cualquier
+# programa del usuario acceso a todo el teclado). Si el socket se corta,
+# reconecta solo cada segundo.
+# Antes NUNCA arrancaba (bug: hl.on("hyprland.start") anidado dentro de otro
+# hl.on del mismo evento, en hypr/modules/autostart.lua — corregido).
+# Restart=on-failure: si este proceso muere, los gestos del canvas dejan de
+# responder (no se bloquea ninguna tecla: solo escucha) hasta que se reinicie.
+PartOf=graphical-session.target
+After=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStartPre=%h/.config/hypr/scripts/wait-for-hyprland.sh
+ExecStart=/usr/bin/python3 %h/.config/hypr/infinite_desktop/infinite_desktop_core.py 1.6
+Restart=on-failure
+RestartSec=2
+# journalctl --user -u infinite-desktop -f reemplaza al /tmp/infinite-desktop.log
+# suelto que usaba el hl.exec_cmd original.
+
+[Install]
+WantedBy=graphical-session.target
