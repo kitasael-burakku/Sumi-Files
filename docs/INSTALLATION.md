@@ -9,7 +9,9 @@ Two supported paths that end in the same state:
 
 Before either: install the packages in [DEPENDENCIES.md](DEPENDENCIES.md) and
 skim [CONFIGURATION.md](CONFIGURATION.md) — a few values (monitor, input
-devices, GPU driver) are machine-specific.
+devices, GPU driver) are machine-specific. If the machine already has a
+configuration you want to keep parts of, follow [MIGRATING.md](MIGRATING.md)
+instead.
 
 ```bash
 git clone https://github.com/kitasael-burakku/Sumi-Files.git ~/Projects/Sumi-Files
@@ -52,8 +54,9 @@ Useful options (full list: `./install.sh --help`):
 | `-o, --only PATH` | Only one entry, e.g. `--only kitty --only fish` |
 | `-l, --link` | Symlink into the clone instead of copying (edits in `~/.config` then land in the repo directly; files with `@HOME@` are still copied). A path in `~/.config` that already resolves into the clone is left alone |
 | `-t, --target DIR` | Install somewhere else (useful to inspect the result) |
-| `--with-tools` | Also install `dotbackup` and `diskbackup` into `~/.local/bin` |
+| `--with-tools` | Also install `dotbackup` and `diskbackup` into `~/.local/bin` (`--bin-dir` to change it). They are copied (symlinked with `--link`); a copy gets `repo =` in `~/.config/sumi-files/dotbackup.conf` when that file doesn't exist yet |
 | `--enable-services` | Enable the `systemd --user` units afterwards (see [step 6](#6-enable-the-session-units)) |
+| `--skip-colors` | Don't run `apply-static-colors.sh` (keeps the colour files you have, e.g. with dynamic colours on) |
 | `-y, --yes` | No questions (required when stdin is not a terminal) |
 | `-b, --backup-dir DIR` | Where replaced files go |
 | `--no-backup --force` | Replace without keeping copies (not recommended) |
@@ -122,9 +125,10 @@ static palette **before the first login**:
 ### 5. Adapt the machine-specific values
 
 See [CONFIGURATION.md](CONFIGURATION.md). At minimum: `hypr/modules/monitors.lua`
-if your display isn't 1920×1080@200, the GPU block in
-`hypr/modules/environment.lua`, and `hypr/modules/programs.lua` if you use
-other apps.
+if `mode = "highrr"` (highest refresh rate) doesn't pick the mode you want or
+you need a position or scale, the GPU driver variables (in `private.lua`,
+[CONFIGURATION.md § Machine-specific calls](CONFIGURATION.md#machine-specific-calls-in-privatelua)),
+and `hypr/modules/programs.lua` if you use other apps.
 
 ### 6. Enable the session units
 
@@ -147,7 +151,8 @@ systemctl --user enable \
 - `dotbackup-remind.timer` only makes sense once `dotbackup` is installed
   (see [DOTBACKUP.md § Weekly reminder](DOTBACKUP.md#weekly-reminder)).
 
-`./install.sh --enable-services` enables exactly this list.
+`./install.sh --enable-services` enables this list, plus
+`dotbackup-remind.timer` when `dotbackup` is on `$PATH` or in `--bin-dir`.
 
 ### 7. (Optional) Infinite Desktop input reader
 
@@ -184,7 +189,10 @@ ln -s ~/Projects/Sumi-Files/bin/diskbackup ~/.local/bin/diskbackup
 ```
 
 A symlink lets `dotbackup` find the repository by itself; a copy needs
-`repo =` in `~/.config/sumi-files/dotbackup.conf`.
+`repo =` in `~/.config/sumi-files/dotbackup.conf`. Manuals:
+[DOTBACKUP.md](DOTBACKUP.md) (including
+[backing up into your own repository](DOTBACKUP.md#using-your-own-repository))
+and [DISKBACKUP.md](DISKBACKUP.md).
 
 ---
 

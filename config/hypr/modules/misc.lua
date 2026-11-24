@@ -11,6 +11,8 @@ hl.config({
         disable_hyprland_logo   = true, -- If true disables the random hyprland logo / anime girl background. :(
 
         allow_session_lock_restore = true,
-        session_lock_xray = true,
+        session_lock_xray = true,       -- required: Sumi Shell's lock animation uses it
+
+        vrr = 0,                        -- off on purpose (also Hyprland's default; kept explicit)
     },
 })

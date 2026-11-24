@@ -25,6 +25,10 @@ diskbackup               # asks, then backs up
 diskbackup --check       # later: anything pending?
 ```
 
+Moving an existing backup or machine over: [MIGRATING.md § 7](MIGRATING.md#7-second-disk).
+What `diskbackup` is for: the files [CONFIGURATION.md](CONFIGURATION.md#personal-values-keep-them-out-of-git)
+keeps out of git, and the snapshots [`dotbackup`](DOTBACKUP.md) leaves.
+
 ## Destination layout
 
 ```
@@ -89,7 +93,7 @@ Names may contain letters, digits, `.`, `_` and `-` only.
 |---|---|
 | `-c, --config FILE` | settings file |
 | `-d, --dest DIR` | override `dest` |
-| `--init` | create the destination and its marker, then exit |
+| `--init` | create the destination and its marker, then exit (asks first; needs `--yes` when stdin isn't a terminal) |
 | `--allow-system-disk` | with `--init`: accept a destination on the system disk |
 | `--check` | write nothing; exit 2 if anything is pending, 0 if not |
 | `-n, --dry-run` | print what would be done; write nothing, run no `[state]` command |
@@ -125,8 +129,9 @@ Type=oneshot
 ExecStart=%h/.local/bin/diskbackup --yes --quiet
 ```
 
-Pair it with a `.timer` if you want it periodic. Off a terminal, `--yes` is
-required; nothing is ever asked.
+Pair it with a `.timer` if you want it periodic. Off a terminal, a real run
+(and `--init`) requires `--yes`; nothing is ever asked. `--check` and
+`--dry-run` don't need it.
 
 ## Exit codes
 
@@ -164,10 +169,7 @@ explicit ones minus the foreign (AUR) ones:
 
 ## Differences from the original script
 
-The personal `diskbackup` this replaces hardcoded its destination, five
-repositories, three themes, five private files and five folders. Every list
-is now a section of the settings file and the destination layout is the same,
-so an existing backup keeps working after `diskbackup --init` adds the marker.
-New: `--dry-run`, `--only`, `--exclude`, `--no-delete`, `--dest`, the marker,
-the settings-file permission check, `--yes`/`--interactive`. The final
-"Press Enter" pause is opt-in (`--pause`). `--check` keeps its 0/2 contract.
+`diskbackup` 1.0.0 replaces an earlier single-user script whose lists were
+hardcoded; they are now sections of the settings file. The destination
+layout and the `--check` 0/2 contract are unchanged, so an existing backup
+keeps working once `diskbackup --init` adds the marker.

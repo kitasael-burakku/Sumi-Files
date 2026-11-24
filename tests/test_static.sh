@@ -25,7 +25,9 @@ test_static() {
     if command -v shellcheck >/dev/null 2>&1; then
         OUT="$(shellcheck -S warning "$INSTALL" "$ROOT"/hooks/dotbackup/*.sh "$ROOT"/tests/*.sh 2>&1)"
         expect "shellcheck (warning) on install.sh, hooks and tests" test -z "$OUT"
-        OUT="$(find "$ROOT/config" -name '*.sh' -print0 | xargs -0 shellcheck -S error 2>&1)"
+        # only what git would publish: generated copies (music-colors.sh…)
+        # are fragments without a shebang and never versioned
+        OUT="$(cd "$ROOT" && git ls-files -z -co --exclude-standard -- 'config/*.sh' | xargs -0r shellcheck -S error 2>&1)"
         expect "shellcheck (error) on config scripts" test -z "$OUT"
     fi
 

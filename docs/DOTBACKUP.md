@@ -44,8 +44,9 @@ dotbackup --yes --commit --push   # … + push
    failure stops the run before committing.
 9. **Review** — show `git status`; interactive runs offer the full diff and a
    README edit.
-10. **Commit** (only with `--commit` or a "yes") — `git add -A`, secret scan,
-    privacy check, informational lint, `git commit`.
+10. **Commit** (only with `--commit` or a "yes") — `git add -A`, token scan
+    and home-path check ([below](#secret-and-privacy-scan)), informational
+    lint, `git commit`. The personal-data hook already ran in step 8.
 11. **Push** (only with `--push` or a "yes").
 
 ## Options
@@ -87,7 +88,125 @@ Command-line options override the settings file, which overrides the defaults.
 In this order: `--repo`, then `$SUMI_FILES_DIR`, then `repo =` in the settings
 file, then the git repository containing the script itself (when it has a
 `sumi-files.list`). A symlink in `~/.local/bin` pointing into the clone
-therefore needs no configuration; a copy does.
+therefore needs no configuration; a copy does. When none of them gives a
+repository, `dotbackup` exits 64.
+
+The last fallback is the repository the *script* lives in: a `dotbackup`
+symlinked into a Sumi-Files clone, with no `repo =`, backs up into that
+clone. To use your own repository, always name it.
+
+## Using your own repository
+
+`dotbackup` isn't tied to Sumi-Files: it mirrors whatever a manifest lists
+into whatever git repository you name. Two ways to start.
+
+### Option A — a fork of Sumi-Files
+
+Fork Sumi-Files on your git host, then:
+
+```bash
+git clone https://github.com/your-user/Sumi-Files.git ~/Projects/Sumi-Files
+cd ~/Projects/Sumi-Files
+git config core.hooksPath hooks/git   # privacy and token checks on every commit
+./install.sh --with-tools             # preview first with --dry-run
+dotbackup --check
+```
+
+A fork keeps the manifest, `.dotbackup-exclude`, `hooks/` and the tests, so
+everything on this page applies unchanged. `--with-tools` *copies* the tools
+into `~/.local/bin` and, when no settings file exists yet, writes one with
+`repo =` pointing at the clone; symlink them instead
+([INSTALLATION.md § 9](INSTALLATION.md#9-optional-the-tools)) if you want the
+clone's updates to reach the tools.
+
+Right after installing, `--check` exits 0. The colour files the installer
+generates (`kitty/colors/colors.conf`, `hypr/colors.lua`, …) live inside
+mirrored folders, but `.dotbackup-exclude` keeps them out of the mirror.
+
+On a machine that already has a configuration of its own, follow
+[MIGRATING.md](MIGRATING.md) instead.
+
+### Option B — a new repository
+
+Create an empty repository on your git host (no README, so the first push
+isn't rejected), then:
+
+```bash
+mkdir -p ~/Projects/my-dotfiles && cd ~/Projects/my-dotfiles
+git init -b main
+git remote add origin git@github.com:your-user/my-dotfiles.git
+$EDITOR sumi-files.list
+```
+
+A minimal manifest ([syntax](#manifest)):
+
+```
+kitty/
+starship.toml
+~/.bashrc => shell/bashrc
+```
+
+The settings file names the repository (`~/.config/sumi-files/dotbackup.conf`,
+[template](../share/examples/dotbackup.conf)):
+
+```ini
+repo = ~/Projects/my-dotfiles
+branch = main
+expect_remote = *github.com*your-user/my-dotfiles*
+```
+
+Then preview, and run:
+
+```bash
+dotbackup --dry-run   # + config/kitty/…, + config/starship.toml, + config/shell/bashrc
+dotbackup             # asks before copying, committing and pushing
+```
+
+The mirror lands in `<repo>/config/` (the payload folder). The commit runs
+`git add -A`, so the first one also includes `sumi-files.list` and anything
+else in the folder; add a `.gitignore` first if you keep other files there.
+
+### Settings you will usually touch
+
+| Setting (`dotbackup.conf`) | Option | Default | Use |
+|---|---|---|---|
+| `repo` | `--repo` | see [above](#finding-the-repository) | your repository's top level; always set it for your own repository |
+| `payload` | `--payload` | `config` | the repository folder that mirrors `~/.config`; must be a subfolder, never the repository root |
+| `manifest` | `--manifest` | `<repo>/sumi-files.list` | a manifest stored elsewhere or under another name |
+| `branch` | `--branch` | `main` | the only branch `dotbackup` writes on (`master`, …); `''` disables the check |
+| `expect_remote` | `--expect-remote` | none | glob the remote URL must match; recommended, it stops a push to the wrong repository |
+| manifest line `~/path => dst` | | | a file outside `~/.config`; `dst` is relative to the payload, so `~/.bashrc => shell/bashrc` is stored as `config/shell/bashrc` |
+
+### What it doesn't do
+
+- **Create the repository or the remote.** A missing repository folder or
+  manifest exits 66; a folder that isn't a git top level exits 65; no
+  repository configured at all exits 64. With `expect_remote` set, a missing
+  remote stops the run (exit 1) before anything is written; without it, the
+  push fails instead.
+- **Handle authentication.** The push is a plain `git push <remote> <branch>`
+  with git's own credentials: an SSH key, or a credential helper or token for
+  HTTPS. An HTTPS remote without credentials fails; the run exits 1 and the
+  commit stays local (the message prints the `git push` to retry). The push
+  sets no upstream; run `git push -u origin main` once yourself if you want
+  one.
+- **Bring the repository's checks.** Some protections are built into the
+  script; others are files the repository carries:
+
+| Protection | Comes from | In a repository without Sumi-Files' files |
+|---|---|---|
+| Token scan of the staged diff (gitleaks or the built-in patterns) | `dotbackup` | always |
+| Staged lines containing your literal home path abort the commit | `dotbackup` | always (only a warning with `--no-normalize-home`) |
+| Home path stored as `@HOME@` | `dotbackup` | always (unless `normalize_home = false`) |
+| Built-in excludes, manifest and symlink safety, branch/remote/merge guards, snapshots | `dotbackup` | always |
+| Login name and `private-patterns` strings in any file git would commit | `hooks/dotbackup/10-privacy.sh` | only if the repository has it (or `hooks_dir` points at a copy) |
+| `Programs.*` guard, `KEYBINDS.txt`, template parity | `hooks/dotbackup/20-…`, `30-…`, `40-…` | Sumi-Files specific; they skip themselves when their files are missing |
+| The same checks on a plain `git commit` | `hooks/git/pre-commit` | only if the repository has it and `core.hooksPath` points at it |
+| Repository-owned excludes and holds | `.dotbackup-exclude`, `.dotbackup-holds` | only if present |
+
+For a new repository, copying `hooks/dotbackup/10-privacy.sh` into
+`<repo>/hooks/dotbackup/` (keep its licence notice) restores the personal-data
+check; see [Hooks](#hooks).
 
 ## Settings file
 
@@ -167,7 +286,7 @@ committing (the synced files stay in the working tree). Sumi-Files ships:
 
 | Hook | Blocks? | Checks |
 |---|---|---|
-| `10-privacy.sh` | yes | no file git would commit contains your home path, your login name (whole word) or a string from `~/.config/sumi-files/private-patterns` (case-sensitive) |
+| `10-privacy.sh` | yes | no file git would commit contains your home path, your login name (whole word; generic names such as `user` or `root` are skipped) or a string from `~/.config/sumi-files/private-patterns` (case-sensitive) — see [CONFIGURATION.md § Personal values](CONFIGURATION.md#personal-values-keep-them-out-of-git) |
 | `20-programs-guard.sh` | yes | every `Programs.<key>` used in `hypr/` is defined in `programs.lua` |
 | `30-keybinds-doc.sh` | yes (on error) | regenerates `docs/KEYBINDS.txt` from the public `keybinds.lua` only |
 | `40-template-parity.sh` | no | matugen templates and static twins declare the same names |
@@ -193,8 +312,8 @@ Before committing, the staged diff is scanned with `gitleaks` when installed,
 or with a built-in list of token patterns (AWS, GitHub, GitLab, OpenAI-style,
 Slack, Google API keys, private-key blocks) otherwise. Any hit — or any staged
 line still containing your literal home path — aborts the commit and unstages
-everything. `shellcheck` and `fish -n` run on staged scripts for information
-only.
+everything (with `--no-normalize-home` the home-path hit is only a warning).
+`shellcheck` and `fish -n` run on staged scripts for information only.
 
 ## Interactive and automated use
 
@@ -231,11 +350,10 @@ find the repository (a symlink, or `repo =` in the settings file).
 
 ## Differences from the original script
 
-The personal `dotbackup.fish` this replaces had no options and assumed one
-repository, one remote owner and one branch. Kept: snapshot with retention,
-branch/remote/merge/rebase guards, holds, mirror deletions, change listing,
-optional diff and README edit, blocking secret scan, informational lint,
-separate commit and push confirmations. Changed: everything is configurable;
-project-specific checks are hooks; `rsync` is required (the `cp` fallback
-couldn't propagate deletions); prompts are in English, so frontends that
-matched the old Spanish prompt text must use `--yes`/flags or the new text.
+`dotbackup` 1.0.0 replaces an earlier single-user script with a fixed
+repository, remote and branch; its safeguards carry over, now configurable.
+Prompts are in English: a frontend that matched the old prompt text should
+use `--yes` and flags, or `--interactive` with the new questions.
+
+The snapshots it keeps can be copied to a second disk by `diskbackup`
+([DISKBACKUP.md § Settings file](DISKBACKUP.md#settings-file), `[snapshots]`).

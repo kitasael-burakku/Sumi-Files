@@ -117,6 +117,7 @@ Options:
   -c, --config FILE       settings file (default: ~/.config/sumi-files/diskbackup.conf)
   -d, --dest DIR          destination; overrides 'dest =' in the settings
       --init              create the destination and its marker file, then exit
+      --allow-system-disk with --init: accept a destination on the system disk
       --check             write nothing; exit 2 if anything is pending, 0 if not
   -n, --dry-run           print what would be done; write and run nothing
   -o, --only SECTION      only this section, repeatable:

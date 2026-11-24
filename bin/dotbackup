@@ -384,15 +384,17 @@ function resolve_repo_links --argument-names src dst entry
     end
 end
 
-# $HOME escaped for an ERE (and for sed with '#' as the delimiter)
+# $HOME escaped for an ERE. Only ERE metacharacters: GNU grep ≥ 3.8 warns
+# about a needless backslash ("stray \ before /").
 function home_ere
-    string replace -r -a '([][\\\\.^$*+?(){}|/#])' '\\\\$1' -- "$HOME"
+    string replace -r -a '([][\\\\.^$*+?(){}|])' '\\\\$1' -- "$HOME"
 end
 
 # Replace the literal home path with @HOME@ in text files, only where it is a
 # whole path component (so /home/al never rewrites /home/alice).
 function normalize_home --argument-names root
-    set -l esc (home_ere)
+    # sed below uses '#' as its delimiter, so a '#' in $HOME needs escaping
+    set -l esc (home_ere | string replace -a '#' '\\#')
     set -l files (command find "$root" -type f -print0 | command xargs -0r grep -lIF -- "$HOME" 2>/dev/null)
     for f in $files
         command sed -i -E "s#$esc([^A-Za-z0-9_.-]|\$)#@HOME@\\1#g" -- "$f"

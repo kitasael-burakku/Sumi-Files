@@ -48,6 +48,9 @@ cd ~/Projects/Sumi-Files
 [docs/INSTALLATION.md § Manual installation](docs/INSTALLATION.md#manual-installation).
 Both paths end in the same state.
 
+**Already have a configuration** on this machine (devices, monitors, files
+that must stay different)? Follow [docs/MIGRATING.md](docs/MIGRATING.md).
+
 ## The backup tools
 
 ```bash
@@ -63,6 +66,8 @@ diskbackup --check            # anything pending? (exit 2 = yes)
 ```
 
 Manuals: [docs/DOTBACKUP.md](docs/DOTBACKUP.md) · [docs/DISKBACKUP.md](docs/DISKBACKUP.md).
+`dotbackup` also works with a repository of your own:
+[docs/DOTBACKUP.md § Using your own repository](docs/DOTBACKUP.md#using-your-own-repository).
 Both tools are written in Fish, need no extra dependencies beyond `git` and
 `rsync`, take `--help`, and are versioned independently (see
 [CHANGELOG.md](CHANGELOG.md)).
@@ -72,11 +77,12 @@ Both tools are written in Fish, need no extra dependencies beyond `git` and
 | Document | Covers |
 |---|---|
 | [INSTALLATION.md](docs/INSTALLATION.md) | Installer and manual installation, first login, uninstalling |
+| [MIGRATING.md](docs/MIGRATING.md) | Moving a machine that already has its own configuration |
 | [DEPENDENCIES.md](docs/DEPENDENCIES.md) | Required, recommended and optional packages |
-| [CONFIGURATION.md](docs/CONFIGURATION.md) | Machine-specific values and where personal settings go |
+| [CONFIGURATION.md](docs/CONFIGURATION.md) | Machine-specific values, where personal settings go, deliberate settings |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Repository layout, the manifest, the session, the scripts |
-| [THEMING.md](docs/THEMING.md) | Static palette, matugen, GTK and Qt |
-| [DOTBACKUP.md](docs/DOTBACKUP.md) | `dotbackup` manual |
+| [THEMING.md](docs/THEMING.md) | Static palette, matugen, window border, GTK and Qt |
+| [DOTBACKUP.md](docs/DOTBACKUP.md) | `dotbackup` manual, including using your own repository |
 | [DISKBACKUP.md](docs/DISKBACKUP.md) | `diskbackup` manual |
 | [RELEASING.md](docs/RELEASING.md) | Versioning and release procedure |
 | [KEYBINDS.txt](docs/KEYBINDS.txt) | Keybinding reference (generated from `keybinds.lua`) |

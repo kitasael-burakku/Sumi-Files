@@ -6,8 +6,16 @@ in_world() {
     new_sandbox
     RCOPY="$SB/sumi files"
     mkdir -p "$RCOPY"
-    # the working tree as it is, .git included (tracked + untracked files)
-    (cd "$ROOT" && tar -cf - --exclude='./tests' .) | (cd "$RCOPY" && tar -xf -)
+    # the working tree as git would publish it (tracked + untracked, not
+    # ignored), .git included. Ignored files — generated colours, local
+    # completions, private files a dotbackup mirror leaves in config/ — would
+    # make the results depend on the machine running the tests.
+    (cd "$ROOT" && {
+        find .git -print0
+        git ls-files -z -co --exclude-standard -- . ':!:tests' | while IFS= read -r -d '' f; do
+            if [ -e "$f" ] || [ -L "$f" ]; then printf '%s\0' "$f"; fi
+        done
+    } | tar --null --no-recursion -T - -cf -) | (cd "$RCOPY" && tar -xf -)
     TGT="$SB/target config"
     IN=("$RCOPY/install.sh" --target "$TGT" --skip-colors)
 }

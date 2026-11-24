@@ -79,7 +79,10 @@ notification, and the optional `dotbackup` reminder.
 in `hypr/modules/` in order — `programs.lua` before `keybinds.lua`, because
 keybinds read the global `Programs` table — then the plugin files in
 `hypr/plugins/`, each guarded so a missing plugin doesn't abort the config.
-`private.lua` is optional and loaded with `pcall` everywhere.
+`private.lua` is optional and loaded with `pcall` everywhere. `programs.lua`
+requires it first, after `environment.lua` and `input.lua`, so its top-level
+`hl.device`/`hl.env` calls override those defaults
+([CONFIGURATION.md](CONFIGURATION.md#machine-specific-calls-in-privatelua)).
 
 At runtime, Lua-driven settings are re-applied with `hyprctl eval '<lua>'`;
 `hypr/infinite_desktop/hypr_ipc.py` is the shared IPC layer for scripts.

@@ -41,6 +41,20 @@ informational hook).
   bounded with `timeout … || true`: matugen runs hooks in the foreground, so
   one hung hook would stop every template after it.
 
+## Window border
+
+The active border is one solid colour in both modes: the static accent, or
+in dynamic mode the wallpaper's primary colour at 80 % alpha. It has no
+gradient and no angle. The inactive border is the same colour at about 6 %
+alpha. The colour is stored in `hypr/colors.lua`, which
+`hypr/modules/decoration.lua` reads at startup and on every reload.
+`hypr/dynamic-colors.sh` applies it live with `hyprctl eval`.
+
+The `borderangle` animation is disabled (`hypr/modules/animations.lua`). It
+is a looping animation, so it would keep Hyprland redrawing every frame even
+when nothing moves, and a solid border has no angle to animate. The `border`
+animation (the colour change on focus) stays on.
+
 ## GTK
 
 `gtk-3.0/gtk.css` and `gtk-4.0/gtk.css` are one line, `@import 'gtk-colors.css';`.

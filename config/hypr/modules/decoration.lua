@@ -22,7 +22,7 @@ hl.config({
 			if ok and type(c) == "table" and c.active_border and c.inactive_border then
 				return c
 			end
-			return { active_border = "rgba(7ab8b8cc)", inactive_border = "rgba(7ab8b80f)" }
+			return { active_border = "rgba(90cececc)", inactive_border = "rgba(90cece0f)" }
 		end)(),
 
 		resize_on_border = true,

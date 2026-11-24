@@ -11,6 +11,18 @@ suite checks it against `--version`.
 
 ## [Unreleased]
 
+### Added
+- `docs/MIGRATING.md`: moving a machine that already has its own
+  configuration to Sumi-Files, `dotbackup` and `diskbackup`; linked from the
+  README and the other documents.
+- `docs/DOTBACKUP.md` § Using your own repository: a fork or a new
+  repository, the usual settings, what `dotbackup` doesn't do, and which
+  protections depend on the repository's `hooks/`.
+- `docs/CONFIGURATION.md`: top-level `hl.device` / `hl.env` calls in
+  `private.lua` (and why they override the defaults), and the deliberate
+  settings (lock xray, VRR, tearing, border).
+- `docs/THEMING.md` § Window border: solid border, `borderangle` off.
+
 ### Changed
 - Active window border is a solid accent colour in dynamic mode too (no
   gradient, no 45° angle), and the `borderangle` loop animation is off.
@@ -21,6 +33,29 @@ suite checks it against `--version`.
 
 ### Removed
 - `decoration.rounding_power` (no effect with `rounding = 0`).
+
+### Fixed
+- `decoration.lua`: the border fallback used when `hypr/colors.lua` is
+  missing is the static accent (`rgba(90cececc)` / `rgba(90cece0f)`), as its
+  comment says, instead of an older teal.
+- `misc.lua` sets `vrr = 0` explicitly (VRR off on purpose) and notes that
+  `session_lock_xray` is required.
+- `.dotbackup-exclude` lists the generated colour files (`kitty/colors/colors.conf`,
+  `hyprlock/colors.conf`, `hyprlock/scripts/music-colors.sh`, `hypr/colors.lua`,
+  `hypr/dynamic-colors.sh`, `fish/conf.d/theme-goldship.fish`):
+  `dotbackup --check` no longer reports drift right after installing, and they
+  are no longer copied into the working tree.
+- Test suite: the install tests copy only what git would publish, and the
+  config shellcheck only checks those files, so ignored files in a working
+  tree (generated colours, local completions) no longer make tests fail.
+- Documentation now matches `--help` and the code: `install.sh
+  --enable-services` also enables `dotbackup-remind.timer` when `dotbackup`
+  is installed; `--with-tools` copies the tools and may write `repo =`;
+  `--skip-colors` is listed; the monitor step no longer assumes a fixed mode;
+  `dotbackup` exits 64 when it finds no repository, and the home-path check
+  is only a warning with `--no-normalize-home`; `diskbackup --init` needs
+  `--yes` off a terminal. "Differences from the original script" is
+  condensed in `DOTBACKUP.md` and `DISKBACKUP.md`.
 
 ## 0.1.0 — 2026-11-24
 
@@ -52,6 +87,13 @@ suite checks it against `--version`.
 - `fastfetch/fastfetchlogo/fox.txt` (origin and licence unknown; the
   `fox.jsonc` preset stays and works once you supply the file).
 
+## dotbackup [Unreleased]
+
+### Fixed
+- The home-path check before committing no longer makes GNU grep ≥ 3.8 warn
+  "stray \ before /": the path is escaped for ERE metacharacters only (and
+  `#` only for the `sed` that normalises it).
+
 ## dotbackup 1.0.0 — 2026-11-24
 
 ### Added
@@ -78,6 +120,11 @@ suite checks it against `--version`.
   not interactive. Requires rsync (the copy fallback could not mirror
   deletions). Prompts are in English.
 - Project-specific checks moved to hooks.
+
+## diskbackup [Unreleased]
+
+### Fixed
+- `--help` lists `--allow-system-disk`.
 
 ## diskbackup 1.0.0 — 2026-11-24
 
