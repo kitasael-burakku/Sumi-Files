@@ -56,7 +56,32 @@ action="$(notify-send --app-name="minimaru" --icon=software-update-available \
     --action="update=Update now" \
     "Lots of pending updates" "$body" 2>/dev/null)"
 
+# The user's terminal, not a hardcoded one: $TERMINAL, then the
+# xdg-terminal-exec standard, then the usual suspects.
+run_in_terminal() {
+    if [ -n "${TERMINAL:-}" ] && command -v "$TERMINAL" >/dev/null 2>&1; then
+        "$TERMINAL" -e "$@"
+    elif command -v xdg-terminal-exec >/dev/null 2>&1; then
+        xdg-terminal-exec "$@"
+    elif command -v kitty >/dev/null 2>&1; then
+        kitty --title sysupdate -e "$@"
+    elif command -v foot >/dev/null 2>&1; then
+        foot --title sysupdate "$@"
+    elif command -v alacritty >/dev/null 2>&1; then
+        alacritty --title sysupdate -e "$@"
+    elif command -v wezterm >/dev/null 2>&1; then
+        wezterm start -- "$@"
+    else
+        notify-send --app-name="minimaru" -u critical "No terminal found" \
+            "Set \$TERMINAL or install xdg-terminal-exec, then run sysupdate."
+    fi
+}
+
 if [ "$action" = "update" ]; then
-    kitty --title sumi-update -e fish -c 'minimaru update' &
+    if command -v sysupdate >/dev/null 2>&1; then
+        run_in_terminal sysupdate &
+    else
+        run_in_terminal fish -c 'minimaru update' &
+    fi
     disown
 fi

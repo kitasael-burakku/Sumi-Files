@@ -1,0 +1,1350 @@
+#!/usr/bin/env python3
+"""sysupdate — full Arch Linux update (pacman + AUR + Flatpak) with a preview,
+a risk check and a verified end state.
+
+The rule this tool is built around: "pacman exited 0" does NOT mean "the
+system is up to date". pacman can drop an unresolvable package and still exit
+0, yay exits 1 both for "you said no" and for "the build failed", and pkexec
+exits 126 when the password dialog is dismissed. So every phase is followed by
+a *state check* that asks the package database what is still pending, instead
+of trusting exit codes or scraping the transcript:
+
+    preview  →  pacman -Syu  →  verify  →  AUR  →  verify  →  Flatpak  →  post-checks
+
+The preview also answers the question the exit code never could: "will this
+update break something that isn't being rebuilt?" (see WATCH below).
+
+Exit codes, ascending with severity (the worst phase wins):
+     0  SUCCESS                nothing pending, nothing to flag
+    10  UPDATED_WITH_WARNINGS  updated; pacnew / orphans / reboot pending
+    20  SKIPPED_PACKAGES       updates still pending (blocked or held back)
+    30  CANCELLED              declined or authentication cancelled mid-run
+    40  FAILURE                pacman or the AUR helper actually failed
+     1  PRECONDITION           could not start, or declined before starting
+     2  USAGE                  bad arguments or configuration
+   130  INTERRUPTED            Ctrl+C
+`sysupdate check` exits 0 (no risk found), 10 (risks found) or 1 (could not check).
+
+Standard library only; Python ≥ 3.11 for the optional TOML configuration.
+"""
+import sys
+
+sys.dont_write_bytecode = True
+
+import argparse  # noqa: E402
+import fnmatch  # noqa: E402
+import glob  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+import time  # noqa: E402
+from collections import namedtuple  # noqa: E402
+
+VERSION = "2.0.0"
+
+SUCCESS, WARNINGS, SKIPPED, CANCELLED, FAILURE = 0, 10, 20, 30, 40
+PRECONDITION, USAGE, INTERRUPTED = 1, 2, 130
+
+# Paths that tests (and unusual systems) can redirect. Never documented as
+# user settings: they exist so the post-checks can run against a fixture.
+PROC = os.environ.get("SYSUPDATE_PROC", "/proc")
+MODULES = os.environ.get("SYSUPDATE_MODULES", "/usr/lib/modules")
+
+DEFAULTS = {
+    "elevate": "auto",          # auto | pkexec | sudo
+    "aur_helper": "auto",       # auto | yay | paru | none
+    "aur_review": True,         # yay --diffmenu --editmenu
+    "flatpak": "auto",          # auto | true | false
+    "min_free_gib": 2.0,
+    "ignore": [],               # always held back, like pacman --ignore (globs ok)
+    "reboot_triggers": [],      # extra names/globs that recommend a reboot
+    "plugins_hint": "hyprpm update",
+    "after": None,              # None = updates-check.service if it exists; "" = nothing
+    "icons": True,
+    "deep": False,              # always run syumulation in the preview
+    # A package that links against another package's PRIVATE or unstable API
+    # breaks when that package changes upstream version without the dependant
+    # being rebuilt — the soname does not change, so pacman cannot see it.
+    # quickshell and Qt are the canonical case (2026-11: Qt 6.12.1 reached
+    # [extra] days before the quickshell rebuild). Map: package → globs of
+    # the dependencies to watch.
+    "watch": {"quickshell": ["qt6-*"]},
+}
+
+ALWAYS_REBOOT = ("glibc", "systemd", "systemd-libs", "dbus", "dbus-broker",
+                 "mesa", "wayland", "openssl", "amd-ucode", "intel-ucode")
+HYPR_ABI = ("hyprland", "aquamarine", "hyprutils", "hyprgraphics", "hyprcursor", "hyprlang")
+RUSTUP_SHIMS = {"cargo", "cargo-clippy", "cargo-fmt", "cargo-miri", "clippy-driver", "rls",
+                "rust-analyzer", "rust-gdb", "rust-gdbgui", "rust-lldb", "rustc", "rustdoc",
+                "rustfmt", "rustup"}
+PKG_MANAGERS = ("pacman", "yay", "paru", "pamac", "pamac-daemon", "packagekitd", "aura", "trizen", "pikaur")
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+PENDING_RE = re.compile(r"^(\S+)\s+(\S+)\s+->\s+(\S+)(.*)$")
+
+Pkg = namedtuple("Pkg", "source name old new")
+Info = namedtuple("Info", "base version deps")
+
+
+# ── Output ──────────────────────────────────────────────────────────────────
+
+class UI:
+    CODES = {"red": "31", "green": "32", "yellow": "33", "magenta": "35", "cyan": "36",
+             "dim": "90", "bright": "97", "bold": "1"}
+
+    def __init__(self, color=True, icons=True, quiet=False):
+        self.color = color
+        self.icons = icons
+        self.quiet = quiet
+
+    def c(self, name, text):
+        if not self.color:
+            return text
+        return "\x1b[%sm%s\x1b[0m" % (self.CODES[name], text)
+
+    def say(self, text=""):
+        if not self.quiet:
+            print(text, flush=True)
+
+    def ok(self, text):
+        self.say(self.c("green", "  ✓ " + text))
+
+    def warn(self, text):
+        self.say(self.c("yellow", "  ⚠ " + text))
+
+    def bad(self, text):
+        self.say(self.c("red", "  ✘ " + text))
+
+    def info(self, text):
+        self.say(self.c("dim", "  · " + text))
+
+    def detail(self, text):
+        self.say(self.c("dim", "      " + text))
+
+    def section(self, color, icon, text):
+        lead = (icon + " ") if (self.icons and icon) else ""
+        self.say()
+        self.say(self.c(color, "  ── " + lead + text))
+
+    def banner(self, title, subtitle, width=44):
+        inner = width - 2
+        title = ("󰮯  " if self.icons else "") + title
+        self.say()
+        self.say("  ┌" + "─" * inner + "┐")
+        self.say("  │" + self.c("bright", title.center(inner)) + "│")
+        self.say("  ├" + "─" * inner + "┤")
+        self.say("  │" + self.c("dim", subtitle.center(inner)) + "│")
+        self.say("  └" + "─" * inner + "┘")
+        self.say()
+
+    def rule(self):
+        self.say(self.c("dim", "  " + "─" * 52))
+
+    def ask(self, prompt, choices="yN"):
+        """Single-letter prompt; the capital letter is the default. EOF = default."""
+        default = next((ch.lower() for ch in choices if ch.isupper()), "n")
+        try:
+            reply = input(self.c("yellow", "  %s > " % prompt))
+        except EOFError:
+            print()
+            return default
+        reply = reply.strip().lower()
+        if not reply:
+            return default
+        return reply[0] if reply[0] in choices.lower() else default
+
+
+# ── Small helpers ───────────────────────────────────────────────────────────
+
+def c_env():
+    """Environment for every command whose output is parsed: pacman translates
+    its messages, and a Spanish 'no se pudo satisfacer la dependencia' would
+    slip past every pattern below."""
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    return env
+
+
+def q(argv, timeout=None, parse=True):
+    """Run a non-interactive query: (rc, stdout lines, stderr lines)."""
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, errors="replace",
+                           stdin=subprocess.DEVNULL, timeout=timeout,
+                           env=c_env() if parse else None)
+    except FileNotFoundError:
+        return 127, [], ["%s: command not found" % argv[0]]
+    except subprocess.TimeoutExpired:
+        return 124, [], ["%s: timed out after %ss" % (argv[0], timeout)]
+    out = [ANSI.sub("", ln) for ln in p.stdout.splitlines()]
+    err = [ANSI.sub("", ln) for ln in p.stderr.splitlines() if ln.strip()]
+    return p.returncode, out, err
+
+
+def interactive(argv):
+    """Run a command attached to the terminal; returns its exit code."""
+    try:
+        return subprocess.call(argv)
+    except FileNotFoundError:
+        return 127
+
+
+def have(cmd):
+    return shutil.which(cmd) is not None
+
+
+def pacman_conf(key, default):
+    rc, out, _ = q(["pacman-conf", key])
+    vals = [ln.strip() for ln in out if ln.strip()]
+    return vals[0] if rc == 0 and vals else default
+
+
+def upstream(version):
+    """'1:6.12.1-2.1' → '1:6.12.1': the version without pkgrel."""
+    return version.rsplit("-", 1)[0]
+
+
+def dep_name(dep):
+    return re.split(r"[<>=]", dep, maxsplit=1)[0]
+
+
+def split_patterns(values):
+    out = []
+    for v in values or []:
+        for part in str(v).split(","):
+            part = part.strip()
+            if part and part not in out:
+                out.append(part)
+    return out
+
+
+def matches(name, patterns):
+    return any(fnmatch.fnmatchcase(name, p) for p in patterns)
+
+
+def plural(n, word, many=None):
+    return "%d %s" % (n, word if n == 1 else (many or word + "s"))
+
+
+def join_limited(items, limit=8):
+    items = list(items)
+    if len(items) <= limit:
+        return ", ".join(items)
+    return ", ".join(items[:limit]) + ", +%d more" % (len(items) - limit)
+
+
+def parse_pending(lines, source):
+    pkgs = []
+    for ln in lines:
+        m = PENDING_RE.match(ln.strip())
+        if m:
+            pkgs.append((Pkg(source, m.group(1), m.group(2), m.group(3)), "[ignored]" in m.group(4)))
+    return pkgs
+
+
+# ── Configuration ───────────────────────────────────────────────────────────
+
+def config_path():
+    if os.environ.get("SYSUPDATE_CONFIG"):
+        return os.environ["SYSUPDATE_CONFIG"]
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "sysupdate", "config.toml")
+
+
+def load_config(path):
+    """(config, problems). A broken file is a usage error, never silently ignored."""
+    cfg = json.loads(json.dumps(DEFAULTS))
+    if not os.path.exists(path):
+        return cfg, []
+    try:
+        import tomllib
+    except ImportError:
+        return cfg, ["%s: Python 3.11+ is needed to read TOML; using defaults" % path]
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, ValueError) as e:
+        return None, ["%s: %s" % (path, e)]
+    problems = []
+    choices = {"elevate": ("auto", "pkexec", "sudo"), "aur_helper": ("auto", "yay", "paru", "none")}
+    for key, val in data.items():
+        if key not in DEFAULTS:
+            problems.append("%s: unknown setting '%s'" % (path, key))
+            continue
+        if key in choices:
+            if val not in choices[key]:
+                problems.append("%s: %s must be one of %s" % (path, key, ", ".join(choices[key])))
+                continue
+        elif key == "flatpak":
+            if val not in ("auto", True, False):
+                problems.append("%s: flatpak must be \"auto\", true or false" % path)
+                continue
+        elif key in ("aur_review", "icons", "deep"):
+            if not isinstance(val, bool):
+                problems.append("%s: %s must be true or false" % (path, key))
+                continue
+        elif key == "min_free_gib":
+            if not isinstance(val, (int, float)) or val < 0:
+                problems.append("%s: min_free_gib must be a number ≥ 0" % path)
+                continue
+            val = float(val)
+        elif key in ("ignore", "reboot_triggers"):
+            if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+                problems.append("%s: %s must be a list of strings" % (path, key))
+                continue
+        elif key in ("plugins_hint", "after"):
+            if not isinstance(val, str):
+                problems.append("%s: %s must be a string" % (path, key))
+                continue
+        elif key == "watch":
+            if not isinstance(val, dict) or not all(
+                    isinstance(v, list) and all(isinstance(x, str) for x in v) for v in val.values()):
+                problems.append("%s: [watch] maps package = [\"glob\", …]" % path)
+                continue
+        cfg[key] = val
+    return cfg, problems
+
+
+# ── Environment detection ───────────────────────────────────────────────────
+
+def resolve_helper(cfg, args):
+    if args.no_aur:
+        return ""
+    want = cfg["aur_helper"]
+    if want == "none":
+        return ""
+    if want in ("yay", "paru"):
+        return want if have(want) else None   # None = configured but missing
+    return "yay" if have("yay") else "paru" if have("paru") else ""
+
+
+def resolve_elevate(cfg, args):
+    """argv prefix for root, [] when already root, None when impossible."""
+    if os.geteuid() == 0:
+        return []
+    want = args.elevate or cfg["elevate"]
+    if want in ("pkexec", "sudo"):
+        return [want] if have(want) else None
+    graphical = bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"))
+    # A desktop session has a polkit agent; a TTY or SSH session usually
+    # doesn't, and there sudo is the path that is known to prompt.
+    order = ("pkexec", "sudo") if graphical else ("sudo", "pkexec")
+    for cmd in order:
+        if have(cmd):
+            return [cmd]
+    return None
+
+
+def running_package_managers():
+    found = []
+    for comm in glob.glob(os.path.join(PROC, "[0-9]*", "comm")):
+        try:
+            with open(comm) as f:
+                name = f.read().strip()
+        except OSError:
+            continue
+        if name in PKG_MANAGERS and int(comm.split("/")[-2]) != os.getpid():
+            found.append("%s (pid %s)" % (name, comm.split("/")[-2]))
+    return found
+
+
+def sudo_warm():
+    return have("sudo") and q(["sudo", "-n", "true"])[0] == 0
+
+
+# ── Preview: what is pending, and is any of it risky? ───────────────────────
+
+class Preview:
+    def __init__(self):
+        self.official = []        # [Pkg]
+        self.official_ok = False
+        self.official_src = ""
+        self.official_err = ""
+        self.ignored_conf = set()  # held by IgnorePkg/IgnoreGroup
+        self.dbpath = None
+        self.aur = []
+        self.aur_ok = None        # None = not queried
+        self.aur_err = ""
+        self.info = {}            # name → Info (new version, from the sync db)
+        self.risks = []           # dicts
+        self.suggest = []         # ignore patterns that make the update safe
+        self.suggest_verified = False
+        self.deep = None
+        self.flatpak = None       # None = not queried; else [app ids]
+        self.flatpak_ok = None
+
+    def pending(self, held):
+        return [p for p in self.official if not matches(p.name, held) and p.name not in self.ignored_conf]
+
+    def held(self, held):
+        return [p for p in self.official if matches(p.name, held) or p.name in self.ignored_conf]
+
+
+def checkupdates_db():
+    if os.environ.get("CHECKUPDATES_DB"):
+        db = os.environ["CHECKUPDATES_DB"]
+    else:
+        db = os.path.join(os.environ.get("TMPDIR") or "/tmp", "checkup-db-%d" % os.getuid())
+    return db if os.path.isdir(os.path.join(db, "sync")) else None
+
+
+def gather_official(pv, no_sync):
+    if have("checkupdates"):
+        argv = ["checkupdates", "--nocolor"] + (["--nosync"] if no_sync else [])
+        rc, out, err = q(argv, timeout=180)
+        if rc in (0, 2):
+            pv.official = [p for p, _ in parse_pending(out, "pacman")]
+            pv.official_ok = True
+            pv.official_src = "checkupdates"
+            pv.dbpath = checkupdates_db()
+            # checkupdates lists IgnorePkg entries too; the local -Qu marks them.
+            _, qu, _ = q(["pacman", "-Qu"])
+            pv.ignored_conf = {p.name for p, ign in parse_pending(qu, "pacman") if ign}
+            return
+        pv.official_err = "checkupdates: " + (" ".join(err)[:200] or "exit %d" % rc)
+    rc, out, err = q(["pacman", "-Qu"])
+    if err:
+        pv.official_err = (pv.official_err + "; " if pv.official_err else "") + "pacman -Qu: " + err[0]
+        return
+    parsed = parse_pending(out, "pacman")
+    pv.official = [p for p, _ in parsed]
+    pv.ignored_conf = {p.name for p, ign in parsed if ign}
+    pv.official_ok = True
+    pv.official_src = "pacman -Qu (local database, as of the last sync)"
+
+
+def aur_query(helper, retries=1):
+    """(ok, [Pkg], error). -Qua exits 1 for 'nothing' AND for failures; only
+    stderr tells them apart. One retry: the AUR RPC resets connections now and
+    then, and a single blip must not read as 'cannot check'."""
+    err = []
+    for attempt in range(retries + 1):
+        rc, out, err = q([helper, "-Qua"], timeout=45)
+        if rc == 0 or (rc == 1 and not err):
+            return True, [p for p, _ in parse_pending(out, "aur")], ""
+        if attempt < retries:
+            time.sleep(float(os.environ.get("SYSUPDATE_RETRY_DELAY", "3")))
+    return False, [], "%s -Qua: %s" % (helper, (" ".join(err) or "failed")[:200])
+
+
+def sync_info(names, dbpath):
+    """name → Info(base, version, deps) of the version an upgrade would install."""
+    if not names:
+        return {}
+    base = ["pacman", "-Sp", "--noconfirm", "--print-format", "%n\t%e\t%v\t%D"]
+    if dbpath:
+        base += ["--dbpath", dbpath]
+
+    def parse(lines):
+        res = {}
+        for ln in lines:
+            f = ln.split("\t")
+            if len(f) == 4:
+                res[f[0]] = Info(f[1], f[2], [dep_name(d) for d in f[3].split()])
+        return res
+
+    rc, out, _ = q(base + ["--"] + sorted(names))
+    if rc == 0:
+        return parse(out)
+    res = {}
+    for n in sorted(names):      # one unresolvable target fails the batch
+        rc, out, _ = q(base + ["--", n])
+        if rc == 0:
+            res.update(parse(out))
+    return res
+
+
+def installed_deps(name):
+    """Direct dependencies of an installed package, or None when not installed."""
+    rc, out, _ = q(["pacman", "-Qi", "--", name])
+    if rc != 0:
+        return None
+    deps, grab = [], False
+    for ln in out:
+        if ln.startswith("Depends On"):
+            grab = True
+            ln = ln.split(":", 1)[1]
+        elif grab and not ln.startswith(" "):
+            break
+        if grab:
+            deps += [dep_name(d) for d in ln.split() if d != "None"]
+    return deps
+
+
+def installed_version(name):
+    rc, out, _ = q(["pacman", "-Q", "--", name])
+    return out[0].split()[1] if rc == 0 and out and len(out[0].split()) > 1 else ""
+
+
+def resolves(ignore, dbpath=None):
+    """(ok, lines): does a full upgrade with these ignores resolve? Pure dry
+    run — no root, no network, no database writes."""
+    argv = ["pacman", "-Sup", "--noconfirm", "--print-format", "%n"]
+    if ignore:
+        argv += ["--ignore", ",".join(ignore)]
+    if dbpath:
+        argv += ["--dbpath", dbpath]
+    rc, out, err = q(argv, timeout=120)
+    return rc == 0, out + err
+
+
+def compute_risks(pv, watch, held):
+    pending = {p.name: p for p in pv.pending(held)}
+    for pkg, globs in watch.items():
+        deps = installed_deps(pkg)
+        if deps is None or pkg in pending:
+            continue          # not installed, or rebuilt in this very batch
+        trig = [pending[n] for n in sorted(pending)
+                if n in deps and matches(n, globs) and upstream(pending[n].old) != upstream(pending[n].new)]
+        if trig:
+            pv.risks.append({"package": pkg, "version": installed_version(pkg), "globs": globs,
+                             "triggers": [p._asdict() for p in trig]})
+    if not pv.risks:
+        return
+    # What to hold back so the rest can go ahead: everything pending that the
+    # watch globs match, plus — to a fixpoint — every pending package that is
+    # a rebuild against them (its new version depends on a held package, or it
+    # shares a pkgbase with one: shiboken6 ships from the pyside6 PKGBUILD).
+    pv.info = sync_info(list(pending), pv.dbpath)
+    globs = []
+    for r in pv.risks:
+        globs += [g for g in r["globs"] if g not in globs]
+    hold = {n for n in pending if matches(n, globs)}
+    bases = {pv.info[n].base for n in hold if n in pv.info}
+    changed = True
+    while changed:
+        changed = False
+        for n in pending:
+            i = pv.info.get(n)
+            if n in hold or not i:
+                continue
+            if i.base in bases or any(d in hold for d in i.deps):
+                hold.add(n)
+                bases.add(i.base)
+                changed = True
+    used = [g for g in globs if any(fnmatch.fnmatchcase(n, g) for n in hold)]
+    extra = sorted(n for n in hold if not matches(n, used))
+    pv.suggest = used + extra
+    # Verify with pacman's own resolver; add whatever it says still needs a
+    # held package, a few rounds at most.
+    for _ in range(5):
+        ok, lines = resolves(held + pv.suggest, pv.dbpath)
+        if ok:
+            pv.suggest_verified = True
+            break
+        more = [m.group(1) for ln in lines for m in [re.search(r"required by (\S+)", ln)] if m]
+        more = [n for n in dict.fromkeys(more) if n not in pv.suggest]
+        if not more:
+            break
+        pv.suggest += more
+
+
+def run_deep(pv, held, ui, json_mode):
+    """syumulation: the slow, thorough check (downloads and inspects ELF files)."""
+    if not have("syumulation"):
+        pv.deep = {"ran": False, "why": "syumulation is not installed"}
+        return
+    fd, path = tempfile.mkstemp(prefix="sysupdate-syumulation.", suffix=".json")
+    os.close(fd)
+    argv = ["syumulation", "--no-color", "--json", path]
+    if held:
+        argv += ["-i"] + held
+    try:
+        if json_mode:
+            rc = subprocess.call(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            ui.info("$ " + " ".join(argv))
+            rc = subprocess.call(argv)
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        pv.deep = {"ran": False, "why": "syumulation produced no report (%s)" % e}
+        return
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    ts = data.get("transaction_summary", {})
+    qt = [c for c in data.get("transaction_causes", []) if c.get("type") == "qt_private_api"]
+    pv.deep = {"ran": True, "rc": rc, "breaks": ts.get("break_edges", 0),
+               "warning_causes": ts.get("warning_causes", 0),
+               "qt_private_api": sorted({n for c in qt for n in c.get("pending_rebuild", [])})}
+
+
+def flatpak_query():
+    """(ok, [app ids]) with pending Flatpak updates. Read-only."""
+    rc, out, _ = q(["flatpak", "remote-ls", "--updates", "--columns=application"], timeout=60)
+    return rc == 0, [ln.strip() for ln in out if ln.strip()]
+
+
+def build_preview(cfg, args, helper, held, ui, json_mode=False, flatpak=False):
+    pv = Preview()
+    gather_official(pv, args.no_sync)
+    if helper:
+        pv.aur_ok, pv.aur, pv.aur_err = aur_query(helper)
+    if flatpak:
+        pv.flatpak_ok, pv.flatpak = flatpak_query()
+    if pv.official_ok and cfg["watch"]:
+        compute_risks(pv, cfg["watch"], held)
+    if args.deep or cfg["deep"]:
+        run_deep(pv, held, ui, json_mode)
+    return pv
+
+
+def show_table(ui, pkgs, details):
+    if not pkgs:
+        return
+    limit = len(pkgs) if details else 30
+    shown = pkgs[:limit]
+    wn = max(len(p.name) for p in shown)
+    wo = max(len(p.old) for p in shown)
+    for p in shown:
+        ui.say("    %-*s  %*s → %s" % (wn, p.name, wo, p.old, p.new))
+    if len(pkgs) > limit:
+        ui.info("… %d more (sysupdate check --details)" % (len(pkgs) - limit))
+
+
+def show_preview(ui, pv, held, helper, details):
+    ui.section("cyan", "󰋼", "Pending")
+    if pv.official_ok:
+        pend = pv.pending(held)
+        if pend:
+            ui.say(ui.c("bold", "  Official repos (%d)" % len(pend)))
+            show_table(ui, pend, details)
+        else:
+            ui.ok("Official repos: nothing to update.")
+        if pv.official_src != "checkupdates":
+            ui.info("Source: " + pv.official_src)
+        if pv.official_err:
+            ui.info(pv.official_err)
+        hb = pv.held(held)
+        if hb:
+            ui.info("Held back (--ignore / IgnorePkg): " + join_limited(p.name for p in hb))
+    else:
+        ui.warn("Could not list official updates: " + pv.official_err)
+    if helper:
+        if pv.aur_ok is False:
+            ui.warn("Could not list AUR updates: " + pv.aur_err)
+        elif pv.aur:
+            ui.say(ui.c("bold", "  AUR — %s (%d)" % (helper, len(pv.aur))))
+            show_table(ui, pv.aur, details)
+        elif pv.aur_ok:
+            ui.ok("AUR: nothing to update.")
+    if pv.flatpak_ok is False:
+        ui.warn("Could not list Flatpak updates; the Flatpak phase will ask flatpak itself.")
+    elif pv.flatpak:
+        ui.say(ui.c("bold", "  Flatpak (%d)" % len(pv.flatpak)))
+        for app in pv.flatpak[:30]:
+            ui.say("    " + app)
+    elif pv.flatpak_ok:
+        ui.ok("Flatpak: nothing to update.")
+    show_risks(ui, pv, held)
+
+
+def show_risks(ui, pv, held):
+    if not pv.risks and not (pv.deep and pv.deep.get("ran")):
+        if pv.deep and not pv.deep.get("ran"):
+            ui.info("Deep check skipped: " + pv.deep["why"])
+        return
+    ui.section("yellow", "󰀦", "Risk check")
+    for r in pv.risks:
+        trig = [Pkg(**t) for t in r["triggers"]]
+        ui.warn("%s %s would run against new versions it was not rebuilt for"
+                % (r["package"], r["version"]))
+        ui.detail(join_limited(("%s %s → %s" % (t.name, t.old, t.new) for t in trig), 4))
+        ui.detail("%s is not part of this update, so no rebuild has been published yet."
+                  % r["package"])
+    if pv.deep:
+        d = pv.deep
+        if not d.get("ran"):
+            ui.info("Deep check skipped: " + d["why"])
+        elif d["breaks"]:
+            ui.bad("syumulation: %s would break" % plural(d["breaks"], "library link"))
+        elif d["qt_private_api"]:
+            ui.warn("syumulation: Qt private API changes, pending rebuild: "
+                    + join_limited(d["qt_private_api"]))
+        else:
+            ui.ok("syumulation: no breakage found (%s to review)"
+                  % plural(d["warning_causes"], "warning cause"))
+    if pv.suggest:
+        spec = ",".join(pv.suggest)
+        ui.info("Safe option: hold them back until the rebuild lands —")
+        ui.say("      " + ui.c("bright", "sysupdate -i '%s'" % spec))
+        if not pv.suggest_verified:
+            ui.info("(pacman could not confirm that the rest resolves without them)")
+
+
+def preview_risky(pv):
+    d = pv.deep or {}
+    return bool(pv.risks) or bool(d.get("ran") and (d.get("breaks") or d.get("qt_private_api")))
+
+
+# ── pacman.log delta ────────────────────────────────────────────────────────
+
+def log_path():
+    return pacman_conf("LogFile", "/var/log/pacman.log")
+
+
+def log_size():
+    try:
+        return os.path.getsize(log_path())
+    except OSError:
+        return None
+
+
+def log_delta(offset):
+    """Lines appended to pacman.log since offset, or None when unknown (log
+    unreadable, or rotated mid-run). 'Unknown' and 'nothing happened' are not
+    the same claim."""
+    if offset is None:
+        return None
+    path = log_path()
+    try:
+        if os.path.getsize(path) < offset:
+            return None
+        with open(path, "rb") as f:
+            f.seek(offset)
+            return f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+
+
+def applied_ops(lines):
+    ops = []
+    for ln in lines or []:
+        m = re.search(r"\[ALPM\] (upgraded|installed|removed|downgraded) (\S+) ", ln)
+        if m:
+            ops.append((m.group(1), m.group(2)))
+    return ops
+
+
+def interrupted_transaction(lines):
+    started = sum(1 for ln in lines or [] if "[ALPM] transaction started" in ln)
+    done = sum(1 for ln in lines or [] if re.search(r"\[ALPM\] transaction (completed|failed)", ln))
+    return started > done
+
+
+# ── Post-update checks ──────────────────────────────────────────────────────
+
+def pacfiles():
+    """(found, blind): .pacnew/.pacsave files, and what could not be read."""
+    dbpath = pacman_conf("DBPath", "/var/lib/pacman/")
+    tracked = set()
+    for files in glob.glob(os.path.join(dbpath, "local", "*", "files")):
+        try:
+            with open(files, errors="replace") as f:
+                grab = False
+                for ln in f:
+                    ln = ln.rstrip("\n")
+                    if ln == "%BACKUP%":
+                        grab = True
+                    elif ln.startswith("%"):
+                        grab = False
+                    elif grab and ln:
+                        tracked.add(os.path.dirname("/" + ln.split("\t")[0]))
+        except OSError:
+            continue
+    blind = [] if tracked else ["(package database unreadable)"]
+    override = os.environ.get("SYSUPDATE_PACNEW_ROOTS")
+    roots = override.split(":") if override else ["/etc", "/boot"]
+    if not override:
+        for d in sorted(tracked):
+            if os.path.isdir(d) and not any(d == r or d.startswith(r + "/") for r in roots):
+                roots.append(d)
+    roots = [r for r in roots if os.path.isdir(r)]
+    if not roots:
+        return [], blind
+    argv = ["find"] + roots + ["-xdev", "-type", "f", "(", "-name", "*.pacnew", "-o", "-name", "*.pacsave", ")"]
+    privileged = sudo_warm()
+    rc, out, err = q((["sudo", "-n"] if privileged else []) + argv, timeout=120)
+    if privileged:
+        if err:
+            blind.append("(scan error: %s)" % err[0])
+    else:
+        # Unprivileged find always trips over root-only directories; only those
+        # that hold a tracked backup file could hide a .pacnew.
+        for d in sorted(tracked):
+            if os.path.isdir(d) and not os.access(d, os.R_OK | os.X_OK):
+                blind.append(d)
+    return sorted(out), blind
+
+
+def stale_processes():
+    """(lines, blind): processes executing a mapped file that pacman replaced.
+    blind = processes that could not be inspected (-1: scan did not run)."""
+    pat = re.compile(r"^[0-9a-f]+-[0-9a-f]+ [r-][w-]x[ps] .* (/(?:usr|opt)/\S+) \(deleted\)$")
+    hits = {}
+    blind = 0
+    maps = sorted(glob.glob(os.path.join(PROC, "[0-9]*", "maps")))
+    if PROC == "/proc" and sudo_warm():
+        rc, out, err = q(["sudo", "-n", "grep", "-HE", pat.pattern.replace(r"(?:usr|opt)", "(usr|opt)"),
+                          "--"] + maps, timeout=60)
+        for ln in out:
+            path, _, rest = ln.partition(":")
+            m = pat.match(rest)
+            if m:
+                hits.setdefault(path.split("/")[-2], []).append(m.group(1))
+        blind = sum(1 for e in err if "Permission denied" in e)
+    else:
+        for mp in maps:
+            pid = mp.split("/")[-2]
+            if pid == str(os.getpid()):
+                continue
+            try:
+                with open(mp, errors="replace") as f:
+                    for ln in f:
+                        m = pat.match(ln.rstrip("\n"))
+                        if m:
+                            hits.setdefault(pid, []).append(m.group(1))
+            except PermissionError:
+                blind += 1
+            except OSError:
+                pass          # exited during the scan: gone processes run no stale code
+    lines = []
+    for pid in sorted(hits, key=int):
+        try:
+            with open(os.path.join(PROC, pid, "comm")) as f:
+                name = f.read().strip() or "pid " + pid
+        except OSError:
+            name = "pid " + pid
+        files = list(dict.fromkeys(hits[pid]))
+        more = ", +%d more" % (len(files) - 1) if len(files) > 1 else ""
+        lines.append("%s (pid %s) — %s%s" % (name, pid, os.path.basename(files[0]), more))
+    return lines, blind
+
+
+def foreign_tools():
+    """Executables no package manager tracks: cargo install, pipx."""
+    home = os.path.expanduser("~")
+    found = []
+    cargo = os.path.join(home, ".cargo", "bin")
+    if os.path.isdir(cargo):
+        for n in sorted(os.listdir(cargo)):
+            p = os.path.join(cargo, n)
+            if n not in RUSTUP_SHIMS and os.path.isfile(p) and os.access(p, os.X_OK):
+                found.append(("cargo", n))
+    data = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    pipx = os.environ.get("PIPX_HOME") or os.path.join(data, "pipx")
+    venvs = os.path.join(pipx, "venvs")
+    if os.path.isdir(venvs):
+        found += [("pipx", n) for n in sorted(os.listdir(venvs))]
+    return found
+
+
+def hypr_plugins_enabled():
+    root = os.path.join("/var/cache/hyprpm", os.environ.get("USER") or "")
+    for state in glob.glob(os.path.join(root, "*", "state.toml")):
+        try:
+            with open(state) as f:
+                if re.search(r"^\s*enabled\s*=\s*true", f.read(), re.M):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def reboot_triggers(ops, extra):
+    hits = set()
+    for action, name in ops:
+        if action not in ("upgraded", "installed", "downgraded"):
+            continue
+        if re.match(r"^linux(-|$)", name):
+            if not re.search(r"-(headers|api-headers|docs)$", name):
+                hits.add(name)
+        elif name.startswith("nvidia") or name in ALWAYS_REBOOT or matches(name, extra):
+            hits.add(name)
+    return sorted(hits)
+
+
+def post_checks(ui, cfg, ops_known, ops):
+    """Read-only. Returns True when something needs the user's attention.
+    Blind spots are reported as information, never as warnings: an
+    unprivileged run cannot read root-only paths, and a warning that fires on
+    every single run teaches you to stop reading warnings."""
+    ui.section("cyan", "󰋼", "Post-update")
+    dirty = False
+
+    found, blind = pacfiles()
+    if found:
+        ui.warn("%s — review with pacdiff" % plural(len(found), ".pacnew/.pacsave file"))
+        for f in found:
+            ui.detail(f)
+        dirty = True
+    elif blind:
+        ui.ok("No .pacnew/.pacsave files in the readable paths.")
+        ui.info("Not readable without root: " + join_limited(blind))
+    else:
+        ui.ok("No .pacnew/.pacsave files.")
+
+    rc, orphans, err = q(["pacman", "-Qtdq"])
+    if err:
+        ui.warn("Could not query orphans: " + err[0])
+        dirty = True
+    elif orphans:
+        ui.warn("%s left orphaned (review: pacman -Qtd)" % plural(len(orphans), "package"))
+        ui.detail(join_limited(orphans, 12))
+        dirty = True
+    else:
+        ui.ok("No orphan packages.")
+
+    running = os.uname().release
+    if not os.path.isdir(os.path.join(MODULES, running)):
+        ui.warn("Reboot required — running kernel %s no longer has modules on disk." % running)
+        dirty = True
+    else:
+        trig = reboot_triggers(ops, cfg["reboot_triggers"])
+        if trig:
+            ui.warn("Reboot recommended — core components updated: " + join_limited(trig))
+            dirty = True
+        elif not ops_known:
+            ui.info("Reboot status unknown — could not read the pacman log.")
+        else:
+            ui.ok("No reboot needed.")
+
+    # hyprpm builds against the RUNNING compositor, which is still the old
+    # binary until the session restarts — so this reports, never rebuilds.
+    hypr = sorted({n for a, n in ops if a in ("upgraded", "installed") and n in HYPR_ABI})
+    if hypr and have("hyprpm") and hypr_plugins_enabled():
+        ui.warn("Hyprland plugins invalidated — updated: " + ", ".join(hypr))
+        ui.info("Restart the session, then run: " + cfg["plugins_hint"])
+        dirty = True
+
+    stale, sblind = stale_processes()
+    if stale:
+        ui.warn("%s running replaced code — restart them" % plural(len(stale), "process", "processes"))
+        for s in stale:
+            ui.detail(s)
+        dirty = True
+    else:
+        ui.ok("No process is running replaced code.")
+    if sblind:
+        ui.info("%s not inspected (root-owned; sudo -n was not available)."
+                % plural(sblind, "process", "processes"))
+
+    tools = foreign_tools()
+    if tools:
+        by = {}
+        for src, n in tools:
+            by.setdefault(src, []).append(n)
+        for src, names in by.items():
+            ui.info("Outside pacman (%s): %s — `%s` updates them."
+                    % (src, join_limited(names), "cargo install" if src == "cargo" else "pipx upgrade-all"))
+    return dirty
+
+
+# ── after-hook ──────────────────────────────────────────────────────────────
+
+def run_after(ui, cfg):
+    cmd = cfg["after"]
+    if cmd is None:
+        if have("systemctl") and q(["systemctl", "--user", "cat", "updates-check.service"], timeout=10)[0] == 0:
+            argv = ["systemctl", "--user", "start", "--no-block", "updates-check.service"]
+            label = "updates-check.service"
+        else:
+            return
+    elif not cmd.strip():
+        return
+    else:
+        argv = ["sh", "-c", cmd]
+        label = cmd
+    rc, _, err = q(argv, timeout=30, parse=False)
+    if rc == 0:
+        ui.info("Update counter refreshed (%s)." % label)
+    else:
+        ui.info("Could not refresh the update counter (%s): %s" % (label, (err or ["exit %d" % rc])[0]))
+
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+def worst(*states):
+    return max(states)
+
+
+def pending_reason(name):
+    """Why is this still pending? Asks libalpm to resolve just that upgrade."""
+    rc, out, err = q(["pacman", "-Sp", "--print-format", "%n", "--", name])
+    if rc == 0:
+        return "upgrade is satisfiable — skipped or declined during this run"
+    lines = out + err     # pacman splits the reason across both streams
+    for ln in lines:
+        m = re.search(r"unable to satisfy dependency '([^']+)' required by", ln)
+        if m:
+            return "unsatisfied dependency " + m.group(1)
+        if "are in conflict" in ln:
+            return re.sub(r"^::\s*", "", ln.strip())
+    for ln in lines:
+        clean = re.sub(r"^(::|error:|warning:)\s*", "", ln.strip())
+        if clean:
+            return clean
+    return "could not be determined"
+
+
+def cmd_check(args, cfg, ui):
+    helper = resolve_helper(cfg, args)
+    held = split_patterns(cfg["ignore"]) + split_patterns(args.ignore)
+    if not have("pacman"):
+        if args.json:
+            print(json.dumps({"error": "pacman not found"}))
+        else:
+            ui.bad("sysupdate needs pacman (Arch Linux or a derivative).")
+        return PRECONDITION
+    pv = build_preview(cfg, args, helper or "", held, ui, json_mode=args.json)
+    if args.json:
+        print(json.dumps({
+            "version": VERSION,
+            "official": {"ok": pv.official_ok, "source": pv.official_src, "error": pv.official_err,
+                         "pending": [p._asdict() for p in pv.pending(held)],
+                         "held": [p._asdict() for p in pv.held(held)]},
+            "aur": {"helper": helper or None, "ok": pv.aur_ok, "error": pv.aur_err,
+                    "pending": [p._asdict() for p in pv.aur]},
+            "risks": pv.risks, "suggested_ignore": pv.suggest, "suggestion_verified": pv.suggest_verified,
+            "deep": pv.deep, "risky": preview_risky(pv),
+        }, ensure_ascii=False))
+    else:
+        show_preview(ui, pv, held, helper, args.details)
+        if helper is None:
+            ui.warn("aur_helper = %s is configured but not installed." % cfg["aur_helper"])
+        ui.say()
+    if not pv.official_ok:
+        return PRECONDITION
+    return WARNINGS if preview_risky(pv) else SUCCESS
+
+
+def preconditions(ui, cfg):
+    if not have("pacman"):
+        ui.bad("sysupdate needs pacman (Arch Linux or a derivative).")
+        return False
+    # The one way an update can leave the system worse off than before: the
+    # disk filling up mid-transaction. Packages land in CacheDir.
+    cache = pacman_conf("CacheDir", "/var/cache/pacman/pkg/")
+    need = cfg["min_free_gib"] * 1024 ** 3
+    seen = set()
+    for path in ("/", cache):
+        while path and not os.path.exists(path):
+            path = os.path.dirname(path.rstrip("/")) or "/"
+        try:
+            st = os.statvfs(path)
+            dev = os.stat(path).st_dev
+        except OSError:
+            continue
+        if dev in seen:
+            continue
+        seen.add(dev)
+        free = st.f_bavail * st.f_frsize
+        label = "/" if path == "/" else "package cache (%s)" % path
+        if free < need:
+            ui.bad("Low space on %s: %.1f GiB free (minimum %g GiB)" % (label, free / 1024 ** 3, cfg["min_free_gib"]))
+            ui.info("Free some space first, e.g. paccache -rk2 (pacman-contrib).")
+            return False
+        ui.ok("Space on %s: %.1f GiB free" % (label, free / 1024 ** 3))
+
+    lock = os.path.join(pacman_conf("DBPath", "/var/lib/pacman/"), "db.lck")
+    if os.path.exists(lock):
+        busy = running_package_managers()
+        if busy:
+            ui.bad("Pacman database is locked — %s is running." % ", ".join(busy))
+            ui.info("Wait for it to finish, then run sysupdate again.")
+        else:
+            ui.bad("Pacman database is locked, but no package manager is running.")
+            ui.info("A crashed or killed pacman leaves this stale lock behind. If you are sure, remove it:")
+            ui.detail(ui.c("bright", "sudo rm %s" % lock))
+        return False
+    ui.ok("Pacman database is free")
+    return True
+
+
+def cmd_update(args, cfg, ui):
+    ui.banner("System update", "pacman · AUR · Flatpak, verified")
+    if not preconditions(ui, cfg):
+        return PRECONDITION
+
+    helper = resolve_helper(cfg, args)
+    if helper is None:
+        ui.bad("aur_helper = %s is configured, but it is not installed." % cfg["aur_helper"])
+        return PRECONDITION
+    elevate = resolve_elevate(cfg, args)
+    if elevate is None:
+        ui.bad("Neither pkexec nor sudo is available to get root for pacman.")
+        return PRECONDITION
+    if os.geteuid() == 0 and helper:
+        ui.info("Running as root: AUR helpers refuse to build as root, so the AUR phase is skipped.")
+        helper = ""
+    use_flatpak = have("flatpak") and not args.no_flatpak and (cfg["flatpak"] in ("auto", True) or args.flatpak)
+    if args.flatpak and not have("flatpak"):
+        ui.warn("--flatpak given, but flatpak is not installed.")
+
+    held = split_patterns(cfg["ignore"]) + split_patterns(args.ignore)
+    pv = build_preview(cfg, args, helper, held, ui, flatpak=use_flatpak)
+    show_preview(ui, pv, held, helper, args.details)
+    ui.say()
+
+    do_pacman = not args.aur_only and (not pv.official_ok or bool(pv.pending(held)))
+    do_aur = bool(helper) and (pv.aur_ok is False or bool(pv.aur))
+    do_flatpak = use_flatpak and (pv.flatpak_ok is False or bool(pv.flatpak))
+    if not (do_pacman or do_aur or do_flatpak):
+        ui.ok("Nothing to update.")
+        run_after(ui, cfg)
+        return SUCCESS
+
+    if preview_risky(pv) and pv.suggest:
+        choice = ui.ask("Continue? [y]es / [i]gnore the risky packages / [N]o", "yiN")
+    else:
+        choice = ui.ask("Continue? [y/N]", "yN")
+    if choice == "i":
+        held += [p for p in pv.suggest if p not in held]
+        do_pacman = not args.aur_only and (not pv.official_ok or bool(pv.pending(held)))
+        ui.info("Holding back: " + ",".join(pv.suggest))
+    elif choice != "y":
+        ui.say(ui.c("red", "  Cancelled."))
+        return PRECONDITION
+
+    state = SUCCESS
+    failed_stage = ""
+    still_pending = []
+    log_mark = log_size()
+    ops_known = log_mark is not None
+    auth_cancelled = False
+
+    # ══ Phase 1 — official repositories ═════════════════════════════════════
+    if do_pacman:
+        ui.section("cyan", "󰚰", "pacman")
+        ui.say()
+        argv = elevate + ["pacman", "-Syu"] + (["--ignore", ",".join(held)] if held else [])
+        rc = 0
+        if elevate == ["sudo"] and interactive(["sudo", "-v"]) != 0:
+            rc = -1           # never got a password: nothing ran
+        else:
+            rc = interactive(argv)
+        delta = log_delta(log_mark)
+        if rc == 0:
+            ui.ok("pacman finished.")
+        elif rc == -1 or (elevate == ["pkexec"] and rc in (126, 127)):
+            auth_cancelled = True
+            ui.warn("Authentication cancelled — pacman did not run.")
+            state = worst(state, CANCELLED)
+            failed_stage = " ".join(argv)
+        elif interrupted_transaction(delta):
+            ui.bad("pacman stopped in the middle of a transaction (exit %d)." % rc)
+            ui.info("Run sysupdate again before rebooting; do not force anything with -Rdd or --overwrite.")
+            state = worst(state, FAILURE)
+            failed_stage = " ".join(argv)
+        elif resolves(held)[0]:
+            ui.warn("pacman did not complete (exit %d) — declined at the prompt, or it stopped before"
+                    " changing anything (its message is above)." % rc)
+            state = worst(state, CANCELLED)
+            failed_stage = " ".join(argv)
+        else:
+            ui.bad("pacman failed (exit %d)." % rc)
+            state = worst(state, FAILURE)
+            failed_stage = " ".join(argv)
+        n = len(applied_ops(delta))
+        if delta is not None:
+            ui.info("%s applied from official repos." % plural(n, "package operation") if n
+                    else "No official packages were changed.")
+
+        # ── State check: what does the database still call out of date? ─────
+        ui.section("cyan", "󰋼", "Still pending from official repos")
+        rc, out, err = q(["pacman", "-Qu"])
+        if err:
+            ui.warn("Could not query pending updates: " + err[0])
+            state = worst(state, WARNINGS)
+        else:
+            parsed = parse_pending(out, "pacman")
+            if not parsed:
+                ui.ok("Nothing left pending.")
+            held_now = [p for p, ign in parsed if ign or matches(p.name, held)]
+            blocked = [p for p, ign in parsed if not (ign or matches(p.name, held))]
+            if auth_cancelled:
+                for p in blocked:
+                    ui.warn("%s %s → %s" % (p.name, p.old, p.new))
+            else:
+                # Grouped by reason: fifteen identical "satisfiable" lines bury
+                # the one package that is actually blocked.
+                groups = {}
+                for p in blocked:
+                    groups.setdefault(pending_reason(p.name), []).append(p)
+                for reason, pkgs in sorted(groups.items(), key=lambda g: len(g[1])):
+                    if len(pkgs) == 1:
+                        ui.warn("%s %s → %s" % (pkgs[0].name, pkgs[0].old, pkgs[0].new))
+                    else:
+                        ui.warn("%d packages: %s" % (len(pkgs), join_limited((p.name for p in pkgs), 6)))
+                    ui.detail("Reason: " + reason)
+            if held_now:
+                ui.info("Held back on purpose (%d): %s" % (len(held_now), join_limited(p.name for p in held_now)))
+            if parsed:
+                state = worst(state, SKIPPED)
+                still_pending += [p.name for p, _ in parsed]
+            if blocked and not auth_cancelled and state < CANCELLED:
+                ui.info("Not an error: a repo transition resolves itself on a later sync.")
+                ui.info("Do not force these with -Rdd, --overwrite or manual symlinks.")
+
+    # ══ Phase 2 — AUR ═══════════════════════════════════════════════════════
+    if do_aur:
+        ui.section("magenta", "", "AUR — " + helper)
+        if state >= FAILURE:
+            ui.warn("Skipped: the official phase left the base system in a failed state.")
+            ui.info("Fix the pacman phase first, then run sysupdate again.")
+        elif auth_cancelled and ui.ask("Continue with the AUR phase anyway? [y/N]", "yN") != "y":
+            ui.info("AUR phase skipped.")
+        else:
+            ui.say()
+            before = {(p.name, p.new) for p in pv.aur}
+            aur_args = ["-Sua"] + (["--diffmenu", "--editmenu"] if helper == "yay" and cfg["aur_review"] else [])
+            aur_mark = log_size()
+            arc = interactive([helper] + aur_args)
+            n = len(applied_ops(log_delta(aur_mark)))
+            ok, after, aerr = aur_query(helper)
+            if arc == 0:
+                ui.ok(helper + " finished.")
+            if not ok:
+                ui.warn("Could not query AUR updates: " + aerr)
+                state = worst(state, WARNINGS)
+            else:
+                for p in after:
+                    ui.warn("%s %s → %s  (AUR)" % (p.name, p.old, p.new))
+                still_pending += [p.name + " (AUR)" for p in after]
+                if arc == 0:
+                    state = worst(state, SKIPPED if after else SUCCESS)
+                    if not after:
+                        ui.ok("No AUR packages left pending.")
+                elif not after:
+                    ui.warn("%s exited %d, but nothing is left pending." % (helper, arc))
+                    state = worst(state, WARNINGS)
+                elif n == 0 and {(p.name, p.new) for p in after} == before:
+                    # yay exits 1 for "no" at a prompt and for a failed build
+                    # alike; with nothing installed and the same list pending,
+                    # either way nothing changed.
+                    ui.warn("%s exited %d and installed nothing — declined at a prompt, or a build"
+                            " failed before installing (its output is above)." % (helper, arc))
+                    state = worst(state, CANCELLED)
+                    failed_stage = failed_stage or "%s %s" % (helper, " ".join(aur_args))
+                else:
+                    ui.bad("%s exited %d with packages still pending." % (helper, arc))
+                    state = worst(state, FAILURE)
+                    failed_stage = "%s %s" % (helper, " ".join(aur_args))
+            if n:
+                ui.info("%s applied from AUR." % plural(n, "package operation"))
+
+    # ══ Phase 3 — Flatpak ═══════════════════════════════════════════════════
+    if do_flatpak:
+        ui.section("cyan", "󰏖", "Flatpak")
+        ui.say()
+        frc = interactive(["flatpak", "update"])
+        if frc == 0:
+            ui.ok("flatpak finished.")
+        else:
+            ui.warn("flatpak update exited %d." % frc)
+            state = worst(state, WARNINGS)
+
+    # ══ Post-update checks ══════════════════════════════════════════════════
+    delta = log_delta(log_mark)
+    ops = applied_ops(delta)
+    if post_checks(ui, cfg, ops_known and delta is not None, ops):
+        state = worst(state, WARNINGS)
+
+    run_after(ui, cfg)
+
+    # ══ Verdict ═════════════════════════════════════════════════════════════
+    ui.say()
+    ui.rule()
+    if state == SUCCESS:
+        ui.say(ui.c("green", "  %sSystem fully updated." % ("󰏖  " if ui.icons else "")))
+    elif state == WARNINGS:
+        ui.say(ui.c("yellow", "  %sSystem updated with warnings." % ("󰀦  " if ui.icons else "")))
+    elif state == SKIPPED:
+        ui.say(ui.c("yellow", "  %sSystem updated with packages still pending." % ("󰀦  " if ui.icons else "")))
+        if still_pending:
+            ui.info("%s: %s" % (plural(len(still_pending), "package"), join_limited(still_pending, 10)))
+    elif state == CANCELLED:
+        ui.say(ui.c("red", "  %sSystem update cancelled." % ("󰜺  " if ui.icons else "")))
+        if failed_stage:
+            ui.info("Stopped at: " + failed_stage)
+    else:
+        ui.say(ui.c("red", "  %sSystem update failed." % ("󰅚  " if ui.icons else "")))
+        if failed_stage:
+            ui.info("Failed at: " + failed_stage)
+    ui.rule()
+    ui.say()
+    return state
+
+
+# ── Entry point ─────────────────────────────────────────────────────────────
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(
+        prog="sysupdate",
+        description="Full Arch Linux update (pacman + AUR + Flatpak) with a preview, "
+                    "a risk check and a verified end state.",
+        epilog="Configuration: %s (optional). Exit codes: 0 updated, 10 warnings, "
+               "20 packages still pending, 30 cancelled, 40 failed, 1 could not start, "
+               "2 usage. `check` exits 0 (no risk), 10 (risks found) or 1." % config_path())
+    p.add_argument("command", nargs="?", choices=("update", "check"), default="update",
+                   help="update (default) or check: preview and risk check only, changes nothing")
+    p.add_argument("-i", "--ignore", action="append", default=[], metavar="PKG",
+                   help="hold back packages, like pacman --ignore; repeatable, commas and quoted globs "
+                        "('qt6-*')")
+    p.add_argument("--no-aur", action="store_true", help="skip the AUR phase")
+    p.add_argument("--aur-only", action="store_true", help="skip the pacman phase")
+    p.add_argument("--flatpak", action="store_true", help="update Flatpak apps even if the config disables it")
+    p.add_argument("--no-flatpak", action="store_true", help="skip the Flatpak phase")
+    p.add_argument("--deep", action="store_true",
+                   help="also run syumulation (if installed) in the preview: slower, inspects the ELF files")
+    p.add_argument("--elevate", choices=("auto", "pkexec", "sudo"), help="how to get root for pacman")
+    p.add_argument("--no-sync", action="store_true",
+                   help="check: reuse checkupdates' last database instead of syncing it")
+    p.add_argument("--json", action="store_true", help="check: print a JSON report on stdout")
+    p.add_argument("-d", "--details", action="store_true", help="list every pending package")
+    p.add_argument("--no-pause", action="store_true", help="do not wait for Enter at the end")
+    p.add_argument("--no-color", action="store_true", help="disable colours (also: NO_COLOR)")
+    p.add_argument("--version", action="version", version="sysupdate " + VERSION)
+    a = p.parse_args(argv)
+    if a.no_aur and a.aur_only:
+        p.error("--no-aur and --aur-only exclude each other")
+    if a.flatpak and a.no_flatpak:
+        p.error("--flatpak and --no-flatpak exclude each other")
+    if (a.json or a.no_sync) and a.command != "check":
+        p.error("--json and --no-sync only apply to `sysupdate check`")
+    for pat in split_patterns(a.ignore):
+        if "/" in pat:
+            p.error("--ignore takes package names or globs, not paths: %s" % pat)
+    return a
+
+
+def main(argv):
+    args = parse_args(argv)
+    cfg, problems = load_config(config_path())
+    color = sys.stdout.isatty() and not args.no_color and not os.environ.get("NO_COLOR")
+    ui = UI(color=color, icons=(cfg or DEFAULTS)["icons"], quiet=(args.command == "check" and args.json))
+    if cfg is None:
+        for pr in problems:
+            print("sysupdate: " + pr, file=sys.stderr)
+        return USAGE
+    for pr in problems:
+        print("sysupdate: " + pr, file=sys.stderr)
+    if any("unknown setting" not in pr and "Python 3.11" not in pr for pr in problems):
+        return USAGE
+    pause = (args.command == "update" and not args.no_pause
+             and sys.stdin.isatty() and sys.stdout.isatty())
+    try:
+        rc = cmd_check(args, cfg, ui) if args.command == "check" else cmd_update(args, cfg, ui)
+    except KeyboardInterrupt:
+        print()
+        ui.say(ui.c("red", "  Interrupted."))
+        rc = INTERRUPTED
+    if pause:
+        # Launched as `kitty -e sysupdate`, the window closes the moment this
+        # returns; without the pause the verdict is drawn and destroyed in the
+        # same frame.
+        try:
+            input(ui.c("dim", "  Press Enter to exit..."))
+        except (EOFError, KeyboardInterrupt):
+            pass
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -9,6 +9,8 @@ test_static() {
         expect "fish -n $(basename "$f")" fish --no-config -n "$f"
         expect "fish_indent --check $(basename "$f")" fish_indent --check "$f"
     done
+    expect "python syntax bin/sysupdate" \
+        python3 -I -c 'import ast,sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$SYSUPDATE"
 
     bad=""
     while IFS= read -r -d '' f; do

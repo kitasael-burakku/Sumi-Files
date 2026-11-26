@@ -1,0 +1,41 @@
+# sysupdate settings — copy to ~/.config/sysupdate/config.toml.
+# Every key is optional; the values below are the defaults.
+
+# How to get root for pacman. auto = pkexec in a graphical session (needs a
+# polkit agent), sudo on a TTY or over SSH.
+# With sudo the post-update checks can also read root-only paths.
+#elevate = "auto"            # auto | pkexec | sudo
+
+#aur_helper = "auto"         # auto | yay | paru | none
+#aur_review = true           # yay: review PKGBUILD diffs (--diffmenu --editmenu)
+#flatpak = "auto"            # auto (if installed) | true | false
+
+# Refuse to start with less free space than this on / or the package cache.
+#min_free_gib = 2
+
+# Always held back, like pacman's --ignore (globs allowed).
+#ignore = []
+
+# Extra packages (names or globs) that make sysupdate recommend a reboot.
+# linux*, nvidia*, glibc, systemd, dbus, mesa, wayland, openssl and the CPU
+# microcode packages are always included.
+#reboot_triggers = []
+
+# Shown when Hyprland plugins need a rebuild after the session restarts.
+#plugins_hint = "hyprpm update"
+
+# Command run at the end (through sh -c), e.g. to refresh a bar's update
+# counter. Unset: start updates-check.service if that user unit exists.
+# "" turns it off.
+#after = ""
+
+#icons = true                # Nerd Font glyphs in headings
+#deep = false                # always run syumulation in the preview (slow)
+
+# Packages that use another package's private or unstable API. They break
+# when that package changes its upstream version without the dependant being
+# rebuilt: the soname stays the same, so pacman cannot see the problem.
+# Map each package to globs of the dependencies to watch. Writing this table
+# replaces the default; an empty [watch] turns the check off.
+[watch]
+quickshell = ["qt6-*"]

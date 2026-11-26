@@ -7,18 +7,13 @@
       "desc": "Update the system (pacman + AUR)",
       "glyph": "update",
       "argv": [
-        "fish",
-        "-lc",
-        "sysupdate; ~/.config/hypr/scripts/updates.sh --force >/dev/null; read -P 'Press Enter to exit'"
+        "sysupdate"
       ],
       "runs": "terminal",
+      "title": "sysupdate",
       "role": "system-upgrade",
       "requires": [
-        "pacman",
-        "~/.config/fish/functions/sysupdate.fish",
-        "~/.config/hypr/scripts/updates.sh",
-        "pkexec",
-        "~/.config/fish/conf.d/report-ui.fish"
+        "pacman"
       ]
     },
     {

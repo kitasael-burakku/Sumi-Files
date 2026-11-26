@@ -9,6 +9,7 @@
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 DOTBACKUP="$ROOT/bin/dotbackup"
 DISKBACKUP="$ROOT/bin/diskbackup"
+SYSUPDATE="$ROOT/bin/sysupdate"
 INSTALL="$ROOT/install.sh"
 REAL_PATH="$PATH"
 REAL_HOME="$HOME"
@@ -97,7 +98,7 @@ path_without() {
     local tool
     for tool in fish bash sh env git rsync tar gzip cmp diff find sort sed grep xargs mktemp cat \
         cp mv rm ln mkdir chmod stat id date du cut head tail tr wc dirname basename readlink \
-        realpath comm mountpoint sha256sum printf gitleaks shellcheck perl awk ls touch; do
+        realpath comm mountpoint sha256sum printf gitleaks shellcheck perl awk ls touch python3 sleep; do
         local skip=0 x
         for x in "$@"; do [ "$x" = "$tool" ] && skip=1; done
         [ "$skip" = 1 ] && continue

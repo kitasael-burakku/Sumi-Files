@@ -132,6 +132,14 @@ run_check() {
         au_out="$(mktemp)"; au_err="$(mktemp)"
         timeout 20 "$aur_helper" -Qua >"$au_out" 2>"$au_err"
         au_rc=$?
+        # One retry: the AUR RPC resets connections now and then (seen
+        # 2026-11-25, "connection reset by peer"), and a single blip used to
+        # flag the whole check as failed and fire a critical notification.
+        if (( au_rc == 124 )) || { (( au_rc != 0 )) && [[ -s "$au_err" ]]; }; then
+            sleep 3
+            timeout 20 "$aur_helper" -Qua >"$au_out" 2>"$au_err"
+            au_rc=$?
+        fi
         aur=$(grep -c '[^[:space:]]' "$au_out")
         if (( au_rc == 124 )); then
             error_msg="${error_msg:+$error_msg; }$aur_helper: timeout (20s)"
@@ -271,6 +279,41 @@ fi
 
 classes=("$css_class")
 
+# ── Risk check ──────────────────────────────────────────────────────────────
+# `sysupdate check` knows when an update would leave a package running against
+# dependencies it was not rebuilt for (quickshell vs a new Qt). checkupdates
+# just synced its database, so --no-sync costs no network; --no-aur because
+# the AUR side has no such check. Optional: without sysupdate, nothing changes.
+# Besides the text, the cache gets the package names and the globs sysupdate
+# suggests holding back as JSON arrays (risk_packages, risk_ignore), so Sumi
+# Shell does not have to parse them out of the sentence.
+risk="" risk_packages="[]" risk_ignore="[]"
+if (( updates > 0 )) && command -v sysupdate >/dev/null 2>&1; then
+    mapfile -t risk_lines < <(timeout 60 sysupdate check --json --no-sync --no-aur 2>/dev/null | python3 -I -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    sys.exit()
+if d.get("risky"):
+    pkgs = [str(r["package"]) for r in d.get("risks", []) if isinstance(r, dict) and r.get("package")]
+    ignore = [str(g) for g in d.get("suggested_ignore") or []]
+    tip = (", ".join(pkgs) or "some packages") + " would run against dependencies it was not rebuilt for"
+    if ignore:
+        tip += " — safe: sysupdate -i \x27" + ",".join(ignore) + "\x27"
+    print(" ".join(tip.split()))
+    print(json.dumps(pkgs, separators=(",", ":")))
+    print(json.dumps(ignore, separators=(",", ":")))
+' 2>/dev/null)
+    if (( ${#risk_lines[@]} == 3 )); then
+        risk="${risk_lines[0]}" risk_packages="${risk_lines[1]}" risk_ignore="${risk_lines[2]}"
+    fi
+fi
+if [[ -n "$risk" ]]; then
+    tooltip="$tooltip"$'\n\n'"⚠ Risky: $(pango_escape "$risk")"
+    plain="$plain — risky: $risk"
+fi
+
 if [[ -n "$error_msg" ]]; then
     text="$text 󰀦 " 
     tooltip="$tooltip"$'\n\n'"⚠ $(pango_escape "$error_msg")"
@@ -301,6 +344,7 @@ last_notified=0
 if (( total > 0 && total > last_notified )) && command -v notify-send >/dev/null 2>&1; then
     body="$updates pacman$( [[ -n "$aur_helper" ]] && printf ' · %s AUR (%s)' "$aur" "$aur_helper" )"
     (( ${#kern[@]} > 0 )) && body="$body"$'\n'"Kernel update included — reboot after updating"
+    [[ -n "$risk" ]] && body="$body"$'\n'"⚠ Risky: $risk"
     notify-send -a "minimaru" -i software-update-available \
         "󰚰 Updates available" "$body"
 fi
@@ -326,7 +370,7 @@ fi
 class_json=$(printf '"%s",' "${classes[@]}")
 class_json="[${class_json%,}]"
 
-result="{\"text\":\"$(json_escape "$text")\",\"tooltip\":\"$(json_escape "$tooltip")\",\"class\":${class_json}}"
+result="{\"text\":\"$(json_escape "$text")\",\"tooltip\":\"$(json_escape "$tooltip")\",\"class\":${class_json},\"risk\":\"$(json_escape "$risk")\",\"risk_packages\":${risk_packages},\"risk_ignore\":${risk_ignore}}"
 
 # Write the cache atomically (el FileView del shell la vigila con watch:
 # evita que lea un archivo a medio escribir)

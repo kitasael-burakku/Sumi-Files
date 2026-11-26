@@ -60,7 +60,7 @@ Options:
                          (default: ~/.local/state/sumi-files/backups/<date>)
       --no-backup        replace files without keeping a copy (requires --force)
       --force            allow --no-backup
-      --with-tools       also install dotbackup and diskbackup into ~/.local/bin
+      --with-tools       also install dotbackup, diskbackup and sysupdate into ~/.local/bin
       --bin-dir DIR      where --with-tools installs (default: ~/.local/bin)
       --enable-services  enable the systemd --user units after installing
       --skip-colors      don't run apply-static-colors.sh afterwards
@@ -252,7 +252,7 @@ if [ "$replace" -gt 0 ]; then
 fi
 
 if [ "$DRY_RUN" = 1 ]; then
-    [ "$WITH_TOOLS" = 1 ] && note "would install dotbackup and diskbackup into ${BIN_DIR/#$HOME/\~}"
+    [ "$WITH_TOOLS" = 1 ] && note "would install dotbackup, diskbackup and sysupdate into ${BIN_DIR/#$HOME/\~}"
     [ "$ENABLE_SERVICES" = 1 ] && note "would enable the systemd --user units"
     say ""; note "dry run: nothing was changed"; exit "$E_OK"
 fi
@@ -310,7 +310,7 @@ ok "$installed file(s) installed"
 # ── Tools ───────────────────────────────────────────────────────────────────
 if [ "$WITH_TOOLS" = 1 ]; then
     mkdir -p -- "$BIN_DIR" || die "$E_CANTCREAT" "can't create $BIN_DIR"
-    for tool in dotbackup diskbackup; do
+    for tool in dotbackup diskbackup sysupdate; do
         d="$BIN_DIR/$tool"
         if [ -e "$d" ] || [ -L "$d" ]; then
             if [ -L "$d" ] && [ "$(readlink -- "$d")" = "$REPO/bin/$tool" ]; then continue; fi
@@ -323,7 +323,7 @@ if [ "$WITH_TOOLS" = 1 ]; then
         if [ "$LINK" = 1 ]; then ln -s -- "$REPO/bin/$tool" "$d"; else cp -p -- "$REPO/bin/$tool" "$d"; fi \
             || die "$E_FAIL" "can't install $d"
     done
-    ok "dotbackup and diskbackup installed in ${BIN_DIR/#$HOME/\~}"
+    ok "dotbackup, diskbackup and sysupdate installed in ${BIN_DIR/#$HOME/\~}"
     # A copied dotbackup can't find the repository by its own location.
     conf="${XDG_CONFIG_HOME:-$HOME/.config}/sumi-files/dotbackup.conf"
     if [ "$LINK" = 0 ] && [ ! -e "$conf" ]; then

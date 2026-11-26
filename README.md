@@ -3,7 +3,8 @@
 Dotfiles for a **Hyprland** desktop on Arch Linux / CachyOS: a Lua-configured
 compositor, a `systemd --user` session, a static palette with optional
 wallpaper-driven colours (matugen), Fish, Kitty, Hyprlock, GTK/Qt theming —
-plus two tools to keep it backed up: **`dotbackup`** and **`diskbackup`**.
+plus two tools to keep it backed up, **`dotbackup`** and **`diskbackup`**, and
+**`sysupdate`**, a verified system update with a risk check.
 
 <p align="center">
   <img src="docs/screenshots/hero.jpg" width="820"
@@ -35,6 +36,7 @@ terminals, colours and window borders are Sumi-Files.
 | [`install.sh`](install.sh) | Optional installer (copy or symlink, dry run, automatic backups). |
 | [`bin/dotbackup`](bin/dotbackup) | Mirror your live config back into this repository, then commit/push. |
 | [`bin/diskbackup`](bin/diskbackup) | Mirror repositories, private files and a system inventory to a second disk. |
+| [`bin/sysupdate`](bin/sysupdate) | Full update (pacman + AUR + Flatpak) with a preview, a risk check and a verified end state. |
 | [`hooks/dotbackup/`](hooks/dotbackup) | Checks `dotbackup` runs before committing (privacy, keybind docs, …). |
 | [`hooks/git/`](hooks/git) | `pre-commit` with the same privacy/secret checks for any commit (`git config core.hooksPath hooks/git`). |
 | [`share/examples/`](share/examples) | Settings templates for the tools. |
@@ -58,7 +60,7 @@ cd ~/Projects/Sumi-Files
 ```bash
 ./install.sh --dry-run
 ./install.sh                  # asks before changing anything
-./install.sh --with-tools     # also installs dotbackup and diskbackup
+./install.sh --with-tools     # also installs dotbackup, diskbackup and sysupdate
 ```
 
 **Option B — by hand:** copy only what you want, following
@@ -101,6 +103,7 @@ Both tools are written in Fish, need no extra dependencies beyond `git` and
 | [THEMING.md](docs/THEMING.md) | Static palette, matugen, window border, GTK and Qt |
 | [DOTBACKUP.md](docs/DOTBACKUP.md) | `dotbackup` manual, including using your own repository |
 | [DISKBACKUP.md](docs/DISKBACKUP.md) | `diskbackup` manual |
+| [SYSUPDATE.md](docs/SYSUPDATE.md) | `sysupdate` manual: preview, watch list, exit codes, settings |
 | [RELEASING.md](docs/RELEASING.md) | Versioning and release procedure |
 | [KEYBINDS.txt](docs/KEYBINDS.txt) | Keybinding reference (generated from `keybinds.lua`) |
 

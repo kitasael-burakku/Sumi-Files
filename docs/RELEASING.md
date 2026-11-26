@@ -7,6 +7,7 @@
 | The repository (configuration + installer) | `VERSION`, `install.sh` (`VERSION=`) | `vX.Y.Z` |
 | `dotbackup` | `bin/dotbackup` (`set -g VERSION`) | `dotbackup-vX.Y.Z` |
 | `diskbackup` | `bin/diskbackup` (`set -g VERSION`) | `diskbackup-vX.Y.Z` |
+| `sysupdate` | `bin/sysupdate` (`VERSION = `) | `sysupdate-vX.Y.Z` |
 
 The tools are versioned separately because they are distributed separately:
 someone may copy `diskbackup` alone and needs to know when *its* behaviour

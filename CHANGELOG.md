@@ -33,6 +33,22 @@ suite checks it against `--version`.
   `render.direct_scanout = 2` (auto, games only).
 - Pointer acceleration is `flat` for every device (`input.lua`).
 - Video players, OBS, Steam and games are always fully opaque.
+- `fish/functions/sysupdate.fish` is a thin wrapper around the new
+  `bin/sysupdate` tool (see its section below); `minimaru update` and
+  SUPER+F2 keep working.
+- `sumi-shell/tasks.json`: the `update` task runs `sysupdate` directly. It no
+  longer pauses twice, and the update counter refresh now happens inside
+  sysupdate, so SUPER+F2 and `minimaru update` refresh it too.
+- `hypr/scripts/updates.sh` retries `yay -Qua` once, so a single AUR RPC
+  reset no longer marks the whole check as failed with a critical
+  notification. With `sysupdate` installed, it adds a "Risky" line to the
+  tooltip and notification and three fields to the cache: `risk` (the text),
+  `risk_packages` and `risk_ignore` (JSON lists), which Sumi Shell reads to
+  show the risk and offer Safe upgrade.
+- `hypr/scripts/updates-notify-actionable.sh` opens the user's terminal
+  (`$TERMINAL`, `xdg-terminal-exec`, kitty, foot, alacritty, wezterm)
+  instead of a hardcoded kitty.
+- `install.sh --with-tools` also installs `sysupdate`.
 
 ### Removed
 - `decoration.rounding_power` (no effect with `rounding = 0`).
@@ -148,3 +164,51 @@ suite checks it against `--version`.
   settings file. `--check` keeps its contract (0 up to date, 2 pending,
   pending lines start with `    + ` or `    ~ `); a missing settings file
   exits 66. The final "Press Enter" pause is now opt-in (`--pause`).
+
+## sysupdate 2.0.0 — 2026-11-25
+
+### Added
+- Standalone tool (Python 3, standard library only). It replaces the
+  personal `sysupdate.fish` (the 1.x line) and no longer needs fish,
+  `report-ui.fish` or the rest of the rice.
+- `sysupdate check [--json] [--no-sync]`: preview and risk check that
+  changes nothing.
+- Watch list (`[watch]`, default `quickshell = ["qt6-*"]`): warns when a
+  dependency changes upstream version but the dependant is not rebuilt. It
+  suggests a verified `--ignore` set that includes the rebuilds against the
+  held packages. `i` at the prompt applies it.
+- `--deep`: runs `syumulation` in the preview when it is installed.
+- `-i/--ignore` (globs and commas, forwarded to pacman), `--no-aur`,
+  `--aur-only`, `--flatpak`, `--no-flatpak`, `--elevate`, `-d/--details`,
+  `--no-pause`, `--no-color`, `--version`.
+- Settings file `~/.config/sysupdate/config.toml`
+  (`share/examples/sysupdate.toml`).
+- Optional Flatpak phase. The `after` command refreshes the update counter
+  (by default `updates-check.service`, if it exists).
+- Stale database lock detection: names the running package manager, or
+  prints the `rm` command for a stale lock.
+- Post-checks also list pipx tools, and treat CPU microcode as a reboot
+  trigger.
+
+### Changed
+- The AUR helper is optional. Without yay or paru, the official repositories
+  are still updated (the fish version refused to start).
+- Elevation is configurable: `auto` uses pkexec in a graphical session and
+  sudo on a TTY or SSH.
+- Phases with nothing pending are skipped: no password prompt when only AUR
+  packages are pending, and nothing at all when the system is up to date.
+- Parsed commands run with `LC_ALL=C`, so a translated pacman no longer
+  defeats the checks.
+- The free-space check also covers pacman's `CacheDir`.
+
+### Fixed
+- Declining yay's prompt (or an AUR build that fails before installing
+  anything) is reported as CANCELLED (30) instead of FAILURE (40).
+- A dismissed pkexec dialog (126/127) or a failed `sudo -v` is reported as
+  "authentication cancelled". sysupdate asks before continuing with the AUR
+  phase instead of running it straight away.
+- A pacman transaction that started but never completed (per `pacman.log`)
+  is a FAILURE, even when the remaining upgrade still resolves.
+- Blind spots of unprivileged post-checks (root-only paths, other users'
+  processes) are information. Before, they made every pkexec run end
+  "with warnings".

@@ -55,6 +55,10 @@ Aliases and functions check for these before using them:
 `fzf fd bat eza zoxide ripgrep btop lm_sensors pacman-contrib reflector thefuck`,
 and an AUR helper (`yay` or `paru`) for the `aur*` aliases.
 
+`sysupdate` needs only pacman and Python ≥ 3.11. It uses these if they are
+installed: `pacman-contrib` (`checkupdates`, for a preview that doesn't touch
+the real database), `yay` or `paru`, `flatpak`, and `syumulation` (`--deep`).
+
 ## Separate projects
 
 - **Sumi Shell** — bar, menus, notifications, lock screen:

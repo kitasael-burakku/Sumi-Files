@@ -85,6 +85,7 @@ test_install() {
     run "${IN[@]}" --yes --only kitty --with-tools --bin-dir "$SB/bin dir"
     expect_rc "--with-tools → 0" 0
     expect "dotbackup installed" test -x "$SB/bin dir/dotbackup"
+    expect "sysupdate installed" test -x "$SB/bin dir/sysupdate"
     expect "copied dotbackup gets a settings file" grep -qF "repo = $RCOPY" "$XDG_CONFIG_HOME/sumi-files/dotbackup.conf"
     run "$SB/bin dir/dotbackup" --version
     expect_rc "installed dotbackup runs" 0
