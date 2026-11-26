@@ -59,6 +59,14 @@ hl.window_rule({
 	match = { class = "^(steam|steam_app_\\d+|gamescope|Minecraft.*|minecraft-launcher|lutris|heroic)$" },
 	opaque = true,
 })
+-- Sumi Discord glass (~/Projects/Sumi-Discord, README → Glass): Discord at 100 % so the global opacity doesn't
+-- fade its text; its own alpha (the "Sumi · Glass" theme) still shows the blurred desktop. Not `opaque`/`force_rgbx`:
+-- those discard the alpha channel. Backup: ~/.local/state/sumi-discord-20261124/windowrules.lua.before
+hl.window_rule({
+	name = "sumi-discord-glass",
+	match = { class = "^([Dd]iscord|vesktop)$" },
+	opacity = "1.0 override 1.0 override",
+})
 
 hl.layer_rule({ name = "blur quickshell", match = { namespace = "sumi-shell" }, blur = true, ignore_alpha = 0.4 })
 

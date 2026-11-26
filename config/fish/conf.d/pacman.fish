@@ -11,6 +11,11 @@ end
 # PACMAN · Gestión de paquetes
 # ─────────────────────────────────────────────
 
+# Uso de sudo
+function S --wraps=sudo --description 'alias S sudo'
+    sudo $argv
+end
+
 # Actualización de repositorios (para repositorios + AUR: sysupdate)
 alias Syu='pkexec pacman -Syu'
 alias qu='pacman -Qu'

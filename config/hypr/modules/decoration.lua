@@ -53,10 +53,10 @@ hl.config({
 			enabled = true,
 
 			brightness = 1,
-			contrast = 1,
+			contrast = 2,
 			noise = 0,
 
-			size = 10,
+			size = 5,
 			passes = 3,
 
 			special = true,
